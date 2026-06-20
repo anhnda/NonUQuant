@@ -17,6 +17,6 @@ python debug_ncc_bias_mae_mse.py \
         --n-calib 128 \
         --max-length 512 \
         --groupsize 128 \
-        --wbits 4 \
+        --wbits 3 \
         --score cov --ncc-budget-p 0.02 \
         --ncc-sweeps 1 
