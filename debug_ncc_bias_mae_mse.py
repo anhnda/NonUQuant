@@ -166,12 +166,11 @@ def main():
     ap.add_argument("--ncc-stop-eps", type=float, default=0.0)
     ap.add_argument("--ncc-use-james-stein", action="store_true")
     ap.add_argument("--row-chunk", type=int, default=1024)
-    ap.add_argument("--force-lite", action="store_true",
-                    help="pass mu_var=None to apply_ncc, forcing NCC-Lite "
-                         "scoring. Compare against the default (mu_var=sigma, "
-                         "NCC-Cov) to verify apply_ncc actually USES the "
-                         "variance: if down_proj awMSE is identical both ways, "
-                         "apply_ncc is ignoring mu_var.")
+    ap.add_argument("--score", choices=["lite", "cov"], default="lite",
+                    help="NCC scoring rule. 'lite' = |mu|/g (covariance-free). "
+                         "'cov' = |mu|/((sigma_ii+eps)*g) (NCC-Cov, the derived "
+                         "diagonal bias-variance rule). 'cov' passes sigma_ii.")
+    ap.add_argument("--cov-eps", type=float, default=1e-6)
     # diagnostics
     ap.add_argument("--diag-max-tokens", type=int, default=4096,
                     help="cap tokens kept for activation-weighted MSE")
@@ -179,7 +178,8 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"[setup] device={device} model={args.model_path} "
-          f"max_layers={args.max_layers} bits={args.wbits} gs={args.groupsize}")
+          f"max_layers={args.max_layers} bits={args.wbits} gs={args.groupsize} "
+          f"score={args.score} budget_p={args.ncc_budget_p}")
 
     # ---- load model & tokenizer ----
     tok = AutoTokenizer.from_pretrained(args.model_path, use_fast=True)
@@ -301,14 +301,22 @@ def main():
                                 if X is not None else float("nan"))
 
                 # ---- apply NCC (same call the benchmark uses) ----------------
+                # mu_var for James-Stein must be variance OF THE MEAN estimate
+                # (= activation variance / m), NOT raw activation variance, per
+                # ncc.py docstring. sigma_ii (for NCC-Cov scoring) is the RAW
+                # per-input-channel activation variance.
+                mu_var_js = (sigma / cnt) if args.ncc_use_james_stein else None
                 W_corr, stats = apply_ncc(
                     W_fp=W_fp.to(device),
                     qres=qres,
                     mu=mu,
                     budget_p=args.ncc_budget_p,
                     use_james_stein=args.ncc_use_james_stein,
-                    mu_var=None if args.force_lite else sigma,
+                    mu_var=mu_var_js,
                     row_chunk=args.row_chunk,
+                    score=args.score,
+                    sigma_ii=sigma if args.score == "cov" else None,
+                    cov_eps=args.cov_eps,
                 )
                 W_corr = W_corr.float()
 
