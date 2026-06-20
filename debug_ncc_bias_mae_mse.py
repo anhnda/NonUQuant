@@ -418,6 +418,40 @@ def main():
     if n_awmse_up > 0:
         print("  ?? act-weighted MSE rose somewhere -> check budget_p / gap / Sigma cost (Thm 4).")
     print("=========================================")
+
+    # ---- which layers raised act-weighted MSE, and by how much ----
+    up = [r for r in rows_report
+          if (r["awmse_after"] == r["awmse_after"])
+          and r["awmse_after"] > r["awmse_before"] * (1 + 1e-6)]
+    if up:
+        print("\n--- layers where act-weighted MSE increased ---")
+        print(f"{'layer':<30}{'flips':>7}{'bias_d%':>10}{'awMSE_d%':>11}"
+              f"{'awMSE_abs_d':>14}")
+        for r in sorted(up, key=lambda x: -x["awmse_d%"]):
+            abs_d = r["awmse_after"] - r["awmse_before"]
+            print(f"{r['layer']:<30}{r['flips']:>7}{r['bias_d%']:>+10.2f}"
+                  f"{r['awmse_d%']:>+11.2f}{abs_d:>14.3e}")
+
+    # ---- NET effect across all layers (the number that actually matters) ----
+    # If the summed absolute act-weighted MSE goes DOWN overall, NCC is a net
+    # win even if a few layers individually tick up. Theorem 4 is per-move
+    # sufficient, not per-layer necessary; the aggregate is the honest verdict.
+    tot_bias_b = sum(r["bias_before"] for r in rows_report)
+    tot_bias_a = sum(r["bias_after"] for r in rows_report)
+    valid = [r for r in rows_report if r["awmse_before"] == r["awmse_before"]]
+    tot_aw_b = sum(r["awmse_before"] for r in valid)
+    tot_aw_a = sum(r["awmse_after"] for r in valid)
+    print("\n--- NET (summed over checked layers) ---")
+    if tot_bias_b > 0:
+        print(f"total bias       : {tot_bias_b:.4e} -> {tot_bias_a:.4e} "
+              f"({(tot_bias_a-tot_bias_b)/tot_bias_b*100:+.2f}%)")
+    if tot_aw_b > 0:
+        net = (tot_aw_a - tot_aw_b) / tot_aw_b * 100
+        verdict = "NET WIN" if tot_aw_a <= tot_aw_b else "NET REGRESSION"
+        print(f"total act-wMSE   : {tot_aw_b:.4e} -> {tot_aw_a:.4e} "
+              f"({net:+.2f}%)  [{verdict}]")
+    print("=========================================")
+
     print("\nNote on the two MSE columns:")
     print("  * weight-MSE (mean (W_q-W)^2) is NOT what NCC protects; a complementary")
     print("    flip moves a weight by one full gap, so raw weight-MSE CAN rise. That is")
