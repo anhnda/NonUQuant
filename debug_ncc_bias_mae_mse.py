@@ -166,6 +166,12 @@ def main():
     ap.add_argument("--ncc-stop-eps", type=float, default=0.0)
     ap.add_argument("--ncc-use-james-stein", action="store_true")
     ap.add_argument("--row-chunk", type=int, default=1024)
+    ap.add_argument("--force-lite", action="store_true",
+                    help="pass mu_var=None to apply_ncc, forcing NCC-Lite "
+                         "scoring. Compare against the default (mu_var=sigma, "
+                         "NCC-Cov) to verify apply_ncc actually USES the "
+                         "variance: if down_proj awMSE is identical both ways, "
+                         "apply_ncc is ignoring mu_var.")
     # diagnostics
     ap.add_argument("--diag-max-tokens", type=int, default=4096,
                     help="cap tokens kept for activation-weighted MSE")
@@ -301,7 +307,7 @@ def main():
                     mu=mu,
                     budget_p=args.ncc_budget_p,
                     use_james_stein=args.ncc_use_james_stein,
-                    mu_var=sigma,
+                    mu_var=None if args.force_lite else sigma,
                     row_chunk=args.row_chunk,
                 )
                 W_corr = W_corr.float()
