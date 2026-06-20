@@ -11,9 +11,6 @@ rbvt_model/
 dataset_cache/
 calibration_cache/
 
-GPTVQ/
-NCCQuant/
-
 *.bin
 *.safetensors
 *.pt
