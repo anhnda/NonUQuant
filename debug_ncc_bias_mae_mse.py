@@ -177,6 +177,8 @@ def main():
 
     # ---- load model & tokenizer ----
     tok = AutoTokenizer.from_pretrained(args.model_path, use_fast=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True
     )
