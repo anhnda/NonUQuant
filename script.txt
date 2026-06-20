@@ -6,5 +6,17 @@ python debug_ncc_bias_mae_mse.py \
         --max-length 512 \
         --groupsize 128 \
         --wbits 4 \
-        --ncc-budget-p 0.02 \
-        --ncc-sweeps 1 --force-lite
+        --score lite --ncc-budget-p 0.02 \
+        --ncc-sweeps 1 
+
+
+python debug_ncc_bias_mae_mse.py \
+        --model-path /home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b \
+        --device cuda:0 \
+        --max-layers 2 \
+        --n-calib 16 \
+        --max-length 512 \
+        --groupsize 128 \
+        --wbits 4 \
+        --score cov --ncc-budget-p 0.02 \
+        --ncc-sweeps 1 
