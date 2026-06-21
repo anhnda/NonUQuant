@@ -653,21 +653,6 @@ def main():
         seed=args.seed,
     )
     if args.method == "gptq":
-        gptq_means, gptq_vars = ({}, {})
-        if args.gptq_ncc:
-            gptq_linears = [(n, m) for n, m in model.named_modules()
-                            if isinstance(m, nn.Linear)
-                            and not (args.skip_lmhead and is_lmhead(n))]
-            gptq_means, gptq_vars = collect_layer_stats(
-                model=model,
-                tokenizer=tokenizer,
-                linears=gptq_linears,
-                calib_texts=calib_texts,
-                device=device,
-                n_calib=args.n_calib,
-                max_length=args.max_length,
-                want_var=(args.ncc_score == "cov"),
-            )
         model, gptq_stats = quantize_model_gptq(
             model=model,
             tokenizer=tokenizer,
@@ -687,8 +672,6 @@ def main():
             ncc_budget_p=args.ncc_budget_p,
             ncc_cov_eps=args.ncc_cov_eps,
             ncc_use_james_stein=args.ncc_james_stein,
-            layer_means=gptq_means,
-            layer_vars=gptq_vars,
         )
         quant_stats = vars(gptq_stats)
     else:

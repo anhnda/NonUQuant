@@ -272,8 +272,6 @@ def quantize_model_gptq(
     ncc_budget_p: float = 0.02,
     ncc_cov_eps: float = 1e-6,
     ncc_use_james_stein: bool = False,
-    layer_means: dict | None = None,
-    layer_vars: dict | None = None,
 ):
     linears = _linear_layers(model, skip_lmhead=skip_lmhead)
     print(
@@ -300,9 +298,24 @@ def quantize_model_gptq(
         capture = use_ncc and ncc_baseline == "adjusted"
         gptq = NonUniformGPTQ(layer=module, qres=qres, reference_weight=weight)
 
+        # Accumulate input-activation mean/var for NCC IN THE SAME calib pass,
+        # so they reflect the activations this layer actually sees AFTER upstream
+        # layers have been quantized (sequential). A stale one-shot pre-pass on
+        # the full-precision model gives the wrong mu for deep layers.
+        want_var = use_ncc and ncc_score == "cov"
+        stat_sum = {"s": None, "sq": None, "n": 0}
+
         def add_batch(_m, inp, out):
             x = inp[0] if isinstance(inp, tuple) else inp
             gptq.add_batch(x.data, out.data)
+            if use_ncc:
+                xf = x.reshape(-1, x.shape[-1]).detach().float()
+                s = xf.sum(0)
+                stat_sum["s"] = s if stat_sum["s"] is None else stat_sum["s"] + s
+                stat_sum["n"] += xf.shape[0]
+                if want_var:
+                    sq = (xf * xf).sum(0)
+                    stat_sum["sq"] = sq if stat_sum["sq"] is None else stat_sum["sq"] + sq
 
         handle = module.register_forward_hook(add_batch)
         try:
@@ -325,12 +338,14 @@ def quantize_model_gptq(
         total_time_sec += elapsed
 
         # ---- NCC correction on top of the GPTQ assignment ----
-        if use_ncc and layer_means is not None and name in layer_means:
+        if use_ncc and stat_sum["n"] > 0:
             W_ref = gptq.reference_weight.to(device).float()        # original fp
-            mu = layer_means[name].to(device).float()
+            cnt = max(1, stat_sum["n"])
+            mu = (stat_sum["s"] / cnt).to(device).float()
             sigma_ii = None
-            if layer_vars is not None and name in layer_vars:
-                sigma_ii = layer_vars[name].to(device).float()
+            if want_var and stat_sum["sq"] is not None:
+                ex2 = (stat_sum["sq"] / cnt).to(device).float()
+                sigma_ii = (ex2 - mu * mu).clamp(min=0.0)
 
             # baseline NCC corrects against
             if ncc_baseline == "adjusted":
@@ -342,7 +357,7 @@ def quantize_model_gptq(
                 W_base = W_ref
 
             qres_post = gptq.gptq_quant_result()
-            mu_var_js = (sigma_ii / max(1, gptq.nsamples)) if (ncc_use_james_stein and sigma_ii is not None) else None
+            mu_var_js = (sigma_ii / cnt) if (ncc_use_james_stein and sigma_ii is not None) else None
 
             W_corr, stats = apply_ncc(
                 W_fp=W_base,
