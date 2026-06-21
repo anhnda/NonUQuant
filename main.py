@@ -552,6 +552,20 @@ def build_parser():
     p.add_argument("--gptq-percdamp", type=float, default=0.01)
     p.add_argument("--gptq-act-order", dest="gptq_act_order", action="store_true", default=False)
     p.add_argument("--no-gptq-act-order", dest="gptq_act_order", action="store_false")
+    # --- GPTQ + NCC correction ---
+    p.add_argument("--gptq-ncc", dest="gptq_ncc", action="store_true", default=False,
+                   help="Apply NCC first-moment correction on top of GPTQ assignment.")
+    p.add_argument("--ncc-baseline", choices=["original", "adjusted"], default="original",
+                   help="FP reference NCC corrects against. 'original' = layer "
+                        "weight before GPTQ (true inference target; recommended). "
+                        "'adjusted' = error-feedback-adjusted weight at assignment "
+                        "(restores |e|<=g/2 but undoes GPTQ feedback).")
+    p.add_argument("--ncc-score", choices=["cov", "lite"], default="cov",
+                   help="NCC scoring: cov = |mu|/((sigma_ii+eps)*g) (default); "
+                        "lite = |mu|/g.")
+    p.add_argument("--ncc-budget-p", type=float, default=0.02)
+    p.add_argument("--ncc-cov-eps", type=float, default=1e-6)
+    p.add_argument("--ncc-james-stein", dest="ncc_james_stein", action="store_true", default=False)
 
     p.add_argument("--eval-stride", type=int, default=512)
     p.add_argument("--eval-max-length", type=int, default=2048)
@@ -639,6 +653,21 @@ def main():
         seed=args.seed,
     )
     if args.method == "gptq":
+        gptq_means, gptq_vars = ({}, {})
+        if args.gptq_ncc:
+            gptq_linears = [(n, m) for n, m in model.named_modules()
+                            if isinstance(m, nn.Linear)
+                            and not (args.skip_lmhead and is_lmhead(n))]
+            gptq_means, gptq_vars = collect_layer_stats(
+                model=model,
+                tokenizer=tokenizer,
+                linears=gptq_linears,
+                calib_texts=calib_texts,
+                device=device,
+                n_calib=args.n_calib,
+                max_length=args.max_length,
+                want_var=(args.ncc_score == "cov"),
+            )
         model, gptq_stats = quantize_model_gptq(
             model=model,
             tokenizer=tokenizer,
@@ -652,6 +681,14 @@ def main():
             gptq_blocksize=args.gptq_blocksize,
             gptq_percdamp=args.gptq_percdamp,
             gptq_act_order=args.gptq_act_order,
+            use_ncc=args.gptq_ncc,
+            ncc_baseline=args.ncc_baseline,
+            ncc_score=args.ncc_score,
+            ncc_budget_p=args.ncc_budget_p,
+            ncc_cov_eps=args.ncc_cov_eps,
+            ncc_use_james_stein=args.ncc_james_stein,
+            layer_means=gptq_means,
+            layer_vars=gptq_vars,
         )
         quant_stats = vars(gptq_stats)
     else:
