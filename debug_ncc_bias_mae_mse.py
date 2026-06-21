@@ -320,13 +320,17 @@ def main():
                 X = torch.cat(xcache[key], dim=0).to(device) if key in xcache else None
 
                 # ---- metrics BEFORE NCC (GPTVQ only) -------------------------
-                # MAE/MSE/awMSE are ALWAYS vs original W_fp (true inference
-                # error). Bias is vs the chosen baseline W_base (what NCC drives
-                # to zero). When baseline=original these coincide.
-                m_before = weight_metrics(W_fp, W_gptvq)
+                # bias + the *_self metrics use the chosen baseline W_base
+                # (baseline N -> error vs N). awMSE_orig additionally tracks the
+                # true inference error vs original W_fp so the gap between the
+                # two columns exposes how much error-feedback NCC is undoing.
+                # When baseline=original the two awMSE columns coincide.
+                m_before = weight_metrics(W_base, W_gptvq)
                 bias_before = bias_metric(W_base, W_gptvq, mu)
-                awmse_before = (activation_weighted_mse(W_fp, W_gptvq, X)
+                awmse_before = (activation_weighted_mse(W_base, W_gptvq, X)
                                 if X is not None else float("nan"))
+                awmse_orig_before = (activation_weighted_mse(W_fp, W_gptvq, X)
+                                     if X is not None else float("nan"))
 
                 # ---- apply NCC (same call the benchmark uses) ----------------
                 # mu_var for James-Stein must be variance OF THE MEAN estimate
@@ -349,10 +353,12 @@ def main():
                 W_corr = W_corr.float()
 
                 # ---- metrics AFTER NCC ---------------------------------------
-                m_after = weight_metrics(W_fp, W_corr)
+                m_after = weight_metrics(W_base, W_corr)
                 bias_after = bias_metric(W_base, W_corr, mu)
-                awmse_after = (activation_weighted_mse(W_fp, W_corr, X)
+                awmse_after = (activation_weighted_mse(W_base, W_corr, X)
                                if X is not None else float("nan"))
+                awmse_orig_after = (activation_weighted_mse(W_fp, W_corr, X)
+                                    if X is not None else float("nan"))
 
                 flips = int(getattr(stats, "flips", -1))
                 dt = time.time() - t0
@@ -419,6 +425,9 @@ def main():
                     "mse_d%": pct(m_before["mse"], m_after["mse"]),
                     "awmse_before": awmse_before, "awmse_after": awmse_after,
                     "awmse_d%": pct(awmse_before, awmse_after),
+                    "awmse_orig_before": awmse_orig_before,
+                    "awmse_orig_after": awmse_orig_after,
+                    "awmse_orig_d%": pct(awmse_orig_before, awmse_orig_after),
                     "time_s": dt,
                 }
                 rows_report.append(row)
@@ -429,9 +438,10 @@ def main():
                 print(
                     f"  {key:<28} flips={flips:>6} | "
                     f"bias {bias_before:.4e}->{bias_after:.4e} ({row['bias_d%']:+.2f}%) | "
-                    f"MAE {m_before['mae']:.4e}->{m_after['mae']:.4e} ({row['mae_d%']:+.2f}%) | "
                     f"MSE {m_before['mse']:.4e}->{m_after['mse']:.4e} ({row['mse_d%']:+.2f}%) | "
-                    f"awMSE {awmse_before:.4e}->{awmse_after:.4e} ({row['awmse_d%']:+.2f}%)"
+                    f"awMSE[base] {awmse_before:.4e}->{awmse_after:.4e} ({row['awmse_d%']:+.2f}%) | "
+                    f"awMSE[orig] {awmse_orig_before:.4e}->{awmse_orig_after:.4e} "
+                    f"({row['awmse_orig_d%']:+.2f}%)"
                 )
 
         # propagate this block's output to next block's input
@@ -451,13 +461,24 @@ def main():
         for r in rows_report
     )
     n = len(rows_report)
+    n_awmse_orig_up = sum(
+        (r["awmse_orig_after"] == r["awmse_orig_after"])
+        and r["awmse_orig_after"] > r["awmse_orig_before"] * (1 + 1e-6)
+        for r in rows_report
+    )
     print(f"layers checked          : {n}")
     print(f"bias  not increased     : {n_bias_down}/{n}   (Thm 3 -> expect {n}/{n})")
-    print(f"act-weighted MSE up     : {n_awmse_up}/{n}   (Thm 4 target: expect 0)")
+    print(f"awMSE[base] up          : {n_awmse_up}/{n}   (vs chosen baseline; Thm 4 target 0)")
+    print(f"awMSE[orig] up          : {n_awmse_orig_up}/{n}   (vs ORIGINAL fp = true inference error)")
     if n_bias_down < n:
         print("  !! BIAS WENT UP on some layer -> Theorem 3 / no-overshoot VIOLATED. Bug.")
     if n_awmse_up > 0:
-        print("  ?? act-weighted MSE rose somewhere -> check budget_p / gap / score=cov (Thm 4).")
+        print("  ?? awMSE[base] rose -> check budget_p / gap / score=cov (Thm 4).")
+    if n_awmse_orig_up > n_awmse_up:
+        print("  !! awMSE[orig] rises on MORE layers than awMSE[base]: the chosen")
+        print("     baseline is reducing a self-referential bias while INCREASING")
+        print("     true inference error. With baseline=adjusted this means NCC is")
+        print("     undoing GPTVQ's error-feedback. Prefer baseline=original.")
     print("=========================================")
 
     # ---- which layers raised act-weighted MSE, and by how much ----
@@ -491,8 +512,17 @@ def main():
     if tot_aw_b > 0:
         net = (tot_aw_a - tot_aw_b) / tot_aw_b * 100
         verdict = "NET WIN" if tot_aw_a <= tot_aw_b else "NET REGRESSION"
-        print(f"total act-wMSE   : {tot_aw_b:.4e} -> {tot_aw_a:.4e} "
+        print(f"total act-wMSE[base] : {tot_aw_b:.4e} -> {tot_aw_a:.4e} "
               f"({net:+.2f}%)  [{verdict}]")
+    valid_o = [r for r in rows_report
+               if r["awmse_orig_before"] == r["awmse_orig_before"]]
+    tot_awo_b = sum(r["awmse_orig_before"] for r in valid_o)
+    tot_awo_a = sum(r["awmse_orig_after"] for r in valid_o)
+    if tot_awo_b > 0:
+        neto = (tot_awo_a - tot_awo_b) / tot_awo_b * 100
+        verdicto = "NET WIN" if tot_awo_a <= tot_awo_b else "NET REGRESSION"
+        print(f"total act-wMSE[orig] : {tot_awo_b:.4e} -> {tot_awo_a:.4e} "
+              f"({neto:+.2f}%)  [{verdicto}]  <- TRUE inference error")
     print("=========================================")
 
     print("\nNote on the two MSE columns:")
