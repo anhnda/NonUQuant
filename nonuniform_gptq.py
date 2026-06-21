@@ -90,6 +90,7 @@ class NonUniformGPTQ:
         percdamp: float = 0.01,
         actorder: bool = False,
         freeze_mask: torch.Tensor | None = None,
+        capture_w_assigned: bool = False,
     ) -> tuple[float, float]:
         W = self.reference_weight.clone()
         tick = time.time()
@@ -119,6 +120,10 @@ class NonUniformGPTQ:
 
         losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
+        # Snapshot of error-feedback-adjusted weights at the point of nearest
+        # assignment (== what projection actually sees). In permuted coords if
+        # actorder; un-permuted before return. Only when capture_w_assigned.
+        W_assigned = torch.zeros_like(W) if capture_w_assigned else None
 
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
@@ -151,6 +156,9 @@ class NonUniformGPTQ:
                     frozen = freeze_mask[:, global_col]
                     q = torch.where(frozen, w, q)
                 Q1[:, i] = q
+                if W_assigned is not None:
+                    # w here is the adjusted weight nearest-assignment projects.
+                    W_assigned[:, i1 + i] = w
                 Losses1[:, i] = (w - q) ** 2 / d**2
 
                 err1 = (w - q) / d
@@ -163,10 +171,55 @@ class NonUniformGPTQ:
 
         if actorder and invperm is not None:
             Q = Q[:, invperm]
+            if W_assigned is not None:
+                W_assigned = W_assigned[:, invperm]
 
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
+        # Keep the GPTQ-projected dequant weights and the adjusted snapshot so an
+        # on-top corrector (NCC) can act on the POST-GPTQ codebook assignment.
+        self.Q_dequant = Q.detach().clone()
+        self.W_assigned = W_assigned.detach().clone() if W_assigned is not None else None
         elapsed = time.time() - tick
         return float(torch.sum(losses).item()), elapsed
+
+    @torch.no_grad()
+    def gptq_quant_result(self) -> QuantResult:
+        """Build a QuantResult reflecting the POST-GPTQ assignment.
+
+        After fasterquant, module.weight == Q (dequant). NCC needs indices/
+        W_dequant of THIS assignment, not the pre-GPTQ qres. We recompute the
+        nearest-codeword index of Q per block on the same codebook.
+        """
+        if not hasattr(self, "Q_dequant"):
+            raise RuntimeError("call fasterquant() before gptq_quant_result()")
+        Q = self.Q_dequant.to(self.dev).float()           # [out, in]
+        out_features, in_features = Q.shape
+        bs = self.block_size
+        n_blocks = self.codebooks.shape[1]
+        L = self.codebooks.shape[2]
+        indices = torch.empty(out_features, in_features, dtype=torch.long, device=self.dev)
+        block_cb = torch.empty(out_features, n_blocks, L, device=self.dev)
+        # per-block nearest index of Q on that block's codebook
+        for b in range(n_blocks):
+            c0, c1 = b * bs, min((b + 1) * bs, in_features)
+            if c0 >= c1:
+                continue
+            levels = self.codebooks[:, b, :]              # [out, L] (row-shared grid)
+            qslice = Q[:, c0:c1]                          # [out, w]
+            # nearest level per element
+            d = (qslice.unsqueeze(-1) - levels.unsqueeze(1)).abs()   # [out, w, L]
+            idx = d.argmin(dim=-1)                        # [out, w]
+            indices[:, c0:c1] = idx
+            block_cb[:, b, :] = levels
+        return QuantResult(
+            W_dequant=Q.to(self.layer.weight.dtype),
+            indices=indices,
+            q_levels=self.qres.q_levels,
+            block_scales=self.qres.block_scales,
+            block_size=bs,
+            block_codebooks=block_cb,
+            block_zeros=self.qres.block_zeros,
+        )
 
     def free(self):
         self.H = None
@@ -181,6 +234,24 @@ def _linear_layers(model, skip_lmhead: bool) -> List[Tuple[str, nn.Linear]]:
 
 
 @torch.no_grad()
+def _load_ncc_apply():
+    """Import apply_ncc from the runtime-cloned NCCQuant package."""
+    try:
+        from NCCQuant.quantizers.ncc import apply_ncc  # type: ignore
+        return apply_ncc
+    except Exception:
+        pass
+    try:
+        from quantizers.ncc import apply_ncc  # type: ignore
+        return apply_ncc
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "NCC requested but apply_ncc not importable. Clone NCCQuant "
+            "(git clone https://github.com/anhnda/NCCQuant.git) so that "
+            "NCCQuant/quantizers/ncc.py is on the path."
+        ) from exc
+
+
 def quantize_model_gptq(
     model,
     tokenizer,
@@ -194,19 +265,39 @@ def quantize_model_gptq(
     gptq_blocksize: int = 128,
     gptq_percdamp: float = 0.01,
     gptq_act_order: bool = False,
+    # --- NCC on-top options ---
+    use_ncc: bool = False,
+    ncc_baseline: str = "original",          # "original" | "adjusted"
+    ncc_score: str = "cov",                  # "cov" | "lite"
+    ncc_budget_p: float = 0.02,
+    ncc_cov_eps: float = 1e-6,
+    ncc_use_james_stein: bool = False,
+    layer_means: dict | None = None,
+    layer_vars: dict | None = None,
 ):
     linears = _linear_layers(model, skip_lmhead=skip_lmhead)
     print(
         f"Quantizing {len(linears)} Linear layers "
-        f"({'skipping' if skip_lmhead else 'including'} lm_head) | method=gptq"
+        f"({'skipping' if skip_lmhead else 'including'} lm_head) | "
+        f"method=gptq{'+ncc' if use_ncc else ''}"
+        + (f" | ncc(score={ncc_score}, baseline={ncc_baseline}, p={ncc_budget_p})"
+           if use_ncc else "")
     )
+
+    apply_ncc = _load_ncc_apply() if use_ncc else None
+    if use_ncc and ncc_baseline not in ("original", "adjusted"):
+        raise ValueError(f"ncc_baseline must be original|adjusted, got {ncc_baseline}")
 
     total_error = 0.0
     total_time_sec = 0.0
+    ncc_total_flips = 0
+    ncc_bias_before = 0.0
+    ncc_bias_after = 0.0
 
     for name, module in tqdm(linears, desc="Quantizing layers"):
         weight = module.weight.data
         qres = quantizer.quantize(weight, row_chunk=row_chunk)
+        capture = use_ncc and ncc_baseline == "adjusted"
         gptq = NonUniformGPTQ(layer=module, qres=qres, reference_weight=weight)
 
         def add_batch(_m, inp, out):
@@ -228,15 +319,59 @@ def quantize_model_gptq(
             blocksize=gptq_blocksize,
             percdamp=gptq_percdamp,
             actorder=gptq_act_order,
+            capture_w_assigned=capture,
         )
-        gptq.free()
         total_error += err
         total_time_sec += elapsed
+
+        # ---- NCC correction on top of the GPTQ assignment ----
+        if use_ncc and layer_means is not None and name in layer_means:
+            W_ref = gptq.reference_weight.to(device).float()        # original fp
+            mu = layer_means[name].to(device).float()
+            sigma_ii = None
+            if layer_vars is not None and name in layer_vars:
+                sigma_ii = layer_vars[name].to(device).float()
+
+            # baseline NCC corrects against
+            if ncc_baseline == "adjusted":
+                W_base = gptq.W_assigned
+                if W_base is None:
+                    raise RuntimeError(f"{name}: W_assigned missing (capture failed).")
+                W_base = W_base.to(device).float()
+            else:
+                W_base = W_ref
+
+            qres_post = gptq.gptq_quant_result()
+            mu_var_js = (sigma_ii / max(1, gptq.nsamples)) if (ncc_use_james_stein and sigma_ii is not None) else None
+
+            W_corr, stats = apply_ncc(
+                W_fp=W_base,
+                qres=qres_post,
+                mu=mu,
+                budget_p=ncc_budget_p,
+                use_james_stein=ncc_use_james_stein,
+                mu_var=mu_var_js,
+                row_chunk=row_chunk,
+                score=ncc_score,
+                sigma_ii=sigma_ii if ncc_score == "cov" else None,
+                cov_eps=ncc_cov_eps,
+            )
+            module.weight.data = W_corr.reshape(module.weight.shape).to(module.weight.dtype)
+            ncc_total_flips += int(getattr(stats, "flips", 0))
+            ncc_bias_before += float(getattr(stats, "bias_before", 0.0))
+            ncc_bias_after += float(getattr(stats, "bias_after", 0.0))
+
+        gptq.free()
         print(f"GPTQ layer done | {name} | error={err:.6e} | time={elapsed:.2f}s")
 
     print(f"GPTQ summary | total_error={total_error:.6e} | total_time_sec={total_time_sec:.2f}")
+    if use_ncc:
+        print(
+            f"NCC summary | flips={ncc_total_flips} | "
+            f"bias_before={ncc_bias_before:.6e} -> bias_after={ncc_bias_after:.6e}"
+        )
     return model, GPTQStats(
-        method="gptq",
+        method="gptq+ncc" if use_ncc else "gptq",
         num_linear_layers=len(linears),
         skip_lmhead=skip_lmhead,
         total_error=total_error,
