@@ -216,6 +216,7 @@ class GPTQ:
         svd_rank=None,
         hessian_weighted_lookups=False,
         only_init_kmeans=False,
+        capture_w_assigned=False,
     ):
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
@@ -266,6 +267,11 @@ class GPTQ:
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
+        # Snapshot of the error-feedback-adjusted weights at the moment each
+        # column is assigned to a codeword (== the value nearest-assignment
+        # actually projects). This is W_fp_adjusted, distinct from the original
+        # self.layer.weight. Only populated when capture_w_assigned=True.
+        W_assigned = torch.zeros_like(W) if capture_w_assigned else None
 
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
@@ -348,6 +354,11 @@ class GPTQ:
                     w_scaled = W1_scaled[:, i : i + vq_dim]  # R x D
                     s = S1[:, i : i + vq_dim]
 
+                    # w is the error-feedback-adjusted weight that nearest
+                    # assignment actually sees. Record it as W_fp_adjusted.
+                    if W_assigned is not None:
+                        W_assigned[:, i1 + i : i1 + i + vq_dim] = w
+
                     H_inv_diag = None
                     if vq_dim > 1 and hessian_weighted_lookups:
                         H_inv_diag = 1.0 / d.to(w.device)
@@ -398,6 +409,23 @@ class GPTQ:
             Q = self.lut_m_step(Q, groupsize, self.quantizer, scale=S, svd_rank=svd_rank)
 
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
+
+        # Expose the error-feedback-adjusted weights (W_fp_adjusted) so an
+        # on-top corrector (e.g. NCC) can use the residual that nearest
+        # assignment actually produced: e = W_dequant - W_assigned, with
+        # |e| <= g/2 restored. Same layout transforms as Q. Note: m-step (if on)
+        # re-optimises centroids and is NOT reflected here; W_assigned is the
+        # pre-assignment input, which is what the residual bound refers to.
+        if W_assigned is not None:
+            if actorder:
+                W_assigned = W_assigned[:, invperm]
+            if isinstance(self.layer, transformers.Conv1D):
+                W_assigned = W_assigned.t()
+            self.W_assigned = W_assigned.reshape(self.layer.weight.shape).to(
+                self.layer.weight.data.dtype
+            )
+        else:
+            self.W_assigned = None
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 

@@ -171,6 +171,16 @@ def main():
                          "'cov' = |mu|/((sigma_ii+eps)*g) (NCC-Cov, the derived "
                          "diagonal bias-variance rule). 'cov' passes sigma_ii.")
     ap.add_argument("--cov-eps", type=float, default=1e-6)
+    ap.add_argument("--baseline", choices=["original", "adjusted"],
+                    default="original",
+                    help="Which full-precision reference NCC corrects against. "
+                         "'original' = layer.weight before quantization (end-to-end "
+                         "first-moment target; matches the paper's stated target). "
+                         "'adjusted' = error-feedback-adjusted weights at the moment "
+                         "of nearest assignment (restores |e|<=g/2; on-top-of-GPTVQ "
+                         "view). Bias is measured vs the chosen baseline; MAE/MSE/"
+                         "awMSE are ALWAYS measured vs the original (true inference "
+                         "error).")
     # diagnostics
     ap.add_argument("--diag-max-tokens", type=int, default=4096,
                     help="cap tokens kept for activation-weighted MSE")
@@ -179,7 +189,8 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"[setup] device={device} model={args.model_path} "
           f"max_layers={args.max_layers} bits={args.wbits} gs={args.groupsize} "
-          f"score={args.score} budget_p={args.ncc_budget_p}")
+          f"score={args.score} budget_p={args.ncc_budget_p} "
+          f"baseline={args.baseline}")
 
     # ---- load model & tokenizer ----
     tok = AutoTokenizer.from_pretrained(args.model_path, use_fast=True)
@@ -274,8 +285,22 @@ def main():
                     svd_rank=None,
                     hessian_weighted_lookups=args.hessian_weighted_lookups,
                     only_init_kmeans=False,
+                    capture_w_assigned=(args.baseline == "adjusted"),
                 )
                 W_gptvq = module.weight.data.detach().float().clone()
+
+                # Choose the baseline NCC corrects against.
+                if args.baseline == "adjusted":
+                    W_adj = getattr(gptq[nm], "W_assigned", None)
+                    if W_adj is None:
+                        raise RuntimeError(
+                            "baseline=adjusted but gptq.W_assigned is None. "
+                            "Is the patched GPTVQ/gptq.py on the path? "
+                            "(capture_w_assigned support required)."
+                        )
+                    W_base = W_adj.detach().float().clone()
+                else:
+                    W_base = W_fp
 
                 # ---- rebuild QuantResult exactly like the benchmark ----------
                 qres = B._gptvq_quant_result(
@@ -295,8 +320,11 @@ def main():
                 X = torch.cat(xcache[key], dim=0).to(device) if key in xcache else None
 
                 # ---- metrics BEFORE NCC (GPTVQ only) -------------------------
+                # MAE/MSE/awMSE are ALWAYS vs original W_fp (true inference
+                # error). Bias is vs the chosen baseline W_base (what NCC drives
+                # to zero). When baseline=original these coincide.
                 m_before = weight_metrics(W_fp, W_gptvq)
-                bias_before = bias_metric(W_fp, W_gptvq, mu)
+                bias_before = bias_metric(W_base, W_gptvq, mu)
                 awmse_before = (activation_weighted_mse(W_fp, W_gptvq, X)
                                 if X is not None else float("nan"))
 
@@ -307,7 +335,7 @@ def main():
                 # per-input-channel activation variance.
                 mu_var_js = (sigma / cnt) if args.ncc_use_james_stein else None
                 W_corr, stats = apply_ncc(
-                    W_fp=W_fp.to(device),
+                    W_fp=W_base.to(device),
                     qres=qres,
                     mu=mu,
                     budget_p=args.ncc_budget_p,
@@ -322,7 +350,7 @@ def main():
 
                 # ---- metrics AFTER NCC ---------------------------------------
                 m_after = weight_metrics(W_fp, W_corr)
-                bias_after = bias_metric(W_fp, W_corr, mu)
+                bias_after = bias_metric(W_base, W_corr, mu)
                 awmse_after = (activation_weighted_mse(W_fp, W_corr, X)
                                if X is not None else float("nan"))
 
@@ -358,9 +386,9 @@ def main():
                 if s_bb is not None:
                     assert _close(s_bb, bias_before), (
                         f"[{key}] NCC stats.bias_before={float(s_bb):.6e} != "
-                        f"external B_hat(W_gptvq)={bias_before:.6e}. NCC's bias "
-                        f"definition differs from sum_j (mu^T e_j)^2 "
-                        f"(check mu normalisation / per-channel vs summed)."
+                        f"external B_hat(baseline)={bias_before:.6e}. NCC's bias "
+                        f"definition differs from sum_j (mu^T e_j)^2 on the SAME "
+                        f"baseline (check mu norm / per-channel vs summed)."
                     )
                 if s_ba is not None:
                     assert _close(s_ba, bias_after), (
@@ -425,12 +453,11 @@ def main():
     n = len(rows_report)
     print(f"layers checked          : {n}")
     print(f"bias  not increased     : {n_bias_down}/{n}   (Thm 3 -> expect {n}/{n})")
-    print(f"weight-MSE INCREASED    : {n_mse_up}/{n}   (expect 0; NCC may raise raw weight-MSE)")
     print(f"act-weighted MSE up     : {n_awmse_up}/{n}   (Thm 4 target: expect 0)")
     if n_bias_down < n:
         print("  !! BIAS WENT UP on some layer -> Theorem 3 / no-overshoot VIOLATED. Bug.")
     if n_awmse_up > 0:
-        print("  ?? act-weighted MSE rose somewhere -> check budget_p / gap / Sigma cost (Thm 4).")
+        print("  ?? act-weighted MSE rose somewhere -> check budget_p / gap / score=cov (Thm 4).")
     print("=========================================")
 
     # ---- which layers raised act-weighted MSE, and by how much ----
@@ -456,6 +483,8 @@ def main():
     tot_aw_b = sum(r["awmse_before"] for r in valid)
     tot_aw_a = sum(r["awmse_after"] for r in valid)
     print("\n--- NET (summed over checked layers) ---")
+    tot_flips = sum(r["flips"] for r in rows_report)
+    print(f"total flips      : {tot_flips}")
     if tot_bias_b > 0:
         print(f"total bias       : {tot_bias_b:.4e} -> {tot_bias_a:.4e} "
               f"({(tot_bias_a-tot_bias_b)/tot_bias_b*100:+.2f}%)")
