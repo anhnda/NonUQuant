@@ -165,7 +165,3 @@ echo "----------------------------------------------------------------"
 column -t -s$'\t' "$OUT_ROOT/perplexity_table.tsv" 2>/dev/null || cat "$OUT_ROOT/perplexity_table.tsv"
 echo "================================================================"
 
-MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b \
-QUANTIZER=nf4 \
-DEVICE=cuda:0 \
-bash run_gptq_ncc.sh
