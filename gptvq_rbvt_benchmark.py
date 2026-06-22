@@ -114,6 +114,16 @@ def _capture_first_layer_inputs(model, batches, device: torch.device, nsamples: 
             super().__init__()
             self.module = module
 
+        def __getattr__(self, name):
+            # nn.Module.__getattr__ handles registered submodules/params/buffers.
+            # For anything else (e.g. Qwen2 reads decoder_layer.attention_type
+            # before calling forward), delegate to the wrapped module so the
+            # Catcher is transparent to the surrounding model code.
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                return getattr(self.__dict__["_modules"]["module"], name)
+
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["i"] += 1
