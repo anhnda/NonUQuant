@@ -272,6 +272,7 @@ def quantize_model_gptq(
     ncc_budget_p: float = 0.02,
     ncc_cov_eps: float = 1e-6,
     ncc_use_james_stein: bool = False,
+    ncc_mse_guard: bool = False,
 ):
     linears = _linear_layers(model, skip_lmhead=skip_lmhead)
     print(
@@ -370,6 +371,7 @@ def quantize_model_gptq(
                 score=ncc_score,
                 sigma_ii=sigma_ii if ncc_score == "cov" else None,
                 cov_eps=ncc_cov_eps,
+                mse_guard=ncc_mse_guard,
             )
             module.weight.data = W_corr.reshape(module.weight.shape).to(module.weight.dtype)
             ncc_total_flips += int(getattr(stats, "flips", 0))

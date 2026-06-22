@@ -30,6 +30,7 @@ MAX_LEN="${MAX_LEN:-2048}"
 CALIB_DS="${CALIB_DS:-c4}"                    # c4|wikitext2
 BUDGET_P="${BUDGET_P:-0.02}"
 COV_EPS="${COV_EPS:-1e-6}"
+MSE_GUARD="${MSE_GUARD:-0}"          # 1 -> add --ncc-mse-guard (gap<2|e| filter)
 GPTQ_BLOCKSIZE="${GPTQ_BLOCKSIZE:-128}"
 GPTQ_PERCDAMP="${GPTQ_PERCDAMP:-0.01}"
 
@@ -128,6 +129,10 @@ PYEOF
   fi
 }
 
+# optional mse-guard flag appended to NCC variants
+GUARD_FLAG=""
+if [[ "$MSE_GUARD" == "1" ]]; then GUARD_FLAG="--ncc-mse-guard"; fi
+
 # 1) GPTQ base ----------------------------------------------------------------
 if [[ "$RUN_BASE" == "1" ]]; then
   run_variant "gptq_base"
@@ -137,21 +142,21 @@ fi
 if [[ "$RUN_NCC_COV_ORIG" == "1" ]]; then
   run_variant "gptq_ncc_cov_orig" \
     --gptq-ncc --ncc-score cov --ncc-baseline original \
-    --ncc-budget-p "$BUDGET_P" --ncc-cov-eps "$COV_EPS"
+    --ncc-budget-p "$BUDGET_P" --ncc-cov-eps "$COV_EPS" $GUARD_FLAG
 fi
 
 # 3) GPTQ + NCC-Cov, baseline adjusted ----------------------------------------
 if [[ "$RUN_NCC_COV_ADJ" == "1" ]]; then
   run_variant "gptq_ncc_cov_adj" \
     --gptq-ncc --ncc-score cov --ncc-baseline adjusted \
-    --ncc-budget-p "$BUDGET_P" --ncc-cov-eps "$COV_EPS"
+    --ncc-budget-p "$BUDGET_P" --ncc-cov-eps "$COV_EPS" $GUARD_FLAG
 fi
 
 # 4) GPTQ + NCC-Lite, baseline original (ablation) ----------------------------
 if [[ "$RUN_NCC_LITE_ORIG" == "1" ]]; then
   run_variant "gptq_ncc_lite_orig" \
     --gptq-ncc --ncc-score lite --ncc-baseline original \
-    --ncc-budget-p "$BUDGET_P"
+    --ncc-budget-p "$BUDGET_P" $GUARD_FLAG
 fi
 
 echo ""
@@ -164,4 +169,3 @@ echo "Perplexity comparison:"
 echo "----------------------------------------------------------------"
 column -t -s$'\t' "$OUT_ROOT/perplexity_table.tsv" 2>/dev/null || cat "$OUT_ROOT/perplexity_table.tsv"
 echo "================================================================"
-

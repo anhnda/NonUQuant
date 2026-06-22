@@ -566,6 +566,10 @@ def build_parser():
     p.add_argument("--ncc-budget-p", type=float, default=0.02)
     p.add_argument("--ncc-cov-eps", type=float, default=1e-6)
     p.add_argument("--ncc-james-stein", dest="ncc_james_stein", action="store_true", default=False)
+    p.add_argument("--ncc-mse-guard", dest="ncc_mse_guard", action="store_true", default=False,
+                   help="Only admit flips with gap<2|e| (Cor-2 diagonal safety): "
+                        "each flip then reduces both bias and diagonal awMSE. "
+                        "Trades bias-reduction for guaranteed no-awMSE-increase.")
 
     p.add_argument("--eval-stride", type=int, default=512)
     p.add_argument("--eval-max-length", type=int, default=2048)
@@ -672,6 +676,7 @@ def main():
             ncc_budget_p=args.ncc_budget_p,
             ncc_cov_eps=args.ncc_cov_eps,
             ncc_use_james_stein=args.ncc_james_stein,
+            ncc_mse_guard=args.ncc_mse_guard,
         )
         quant_stats = vars(gptq_stats)
     else:

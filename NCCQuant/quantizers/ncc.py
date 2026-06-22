@@ -101,6 +101,7 @@ def apply_ncc(
     score: str = "lite",
     sigma_ii: Optional[torch.Tensor] = None,
     cov_eps: float = 1e-6,
+    mse_guard: bool = False,
 ) -> tuple[torch.Tensor, NCCStats]:
     """Run block-aware NCC; return corrected dequant weights + stats.
 
@@ -216,6 +217,18 @@ def apply_ncc(
         num_degenerate_dropped += int((would_admit & ~gap_ok).sum().item())
 
         admissible = feasible & sign_ok & gap_ok
+        # Diagonal bias-variance guard (Corollary 2, off-diagonal dropped). A flip
+        # changes the diagonal activation-weighted MSE by
+        #     d(awMSE_i) = sigma_ii * gap * (gap - 2|e_i|),
+        # which is <= 0 iff gap < 2|e_i|. Admitting only these flips makes every
+        # selected move reduce BOTH the first-moment bias (sign filter) AND the
+        # diagonal awMSE -> "reduce bias and original awMSE together". Flips with
+        # gap >= 2|e_i| (typically coarse NF tail cells that overshoot past the
+        # fp value) are excluded. This is the hard-filter form of the certificate;
+        # it trades some bias-reduction for a guaranteed no-awMSE-increase per move.
+        if mse_guard:
+            mse_safe = gap < (2.0 * e.abs())
+            admissible = admissible & mse_safe
         # eta ordering. Floor the denominator at the *same* feasible floor so a
         # surviving candidate's eta cannot be inflated by a sub-floor gap.
         # lite: eta = |mu| / g ; cov: eta = |mu| / ((sigma_ii+eps) * g).
