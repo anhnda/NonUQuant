@@ -539,6 +539,171 @@ def _gptvq_fasterquant_ncc_post_block(gptq: GPTQ, args, mu: torch.Tensor) -> dic
 
 
 @torch.no_grad()
+def _gptvq_fasterquant_rbvt_post_block(
+    gptq: GPTQ,
+    args,
+    mu: torch.Tensor,
+    sigma: torch.Tensor | None,
+) -> dict:
+    if args.wbits not in (3, 4):
+        raise ValueError("Post-block RBVT path expects 3-bit or 4-bit GPTVQ.")
+    if args.groupsize != args.gptq_blocksize:
+        raise ValueError("--rbvt-placement post_block currently requires --groupsize == --gptq-blocksize.")
+    if args.include_m_step:
+        raise ValueError("--rbvt-placement post_block must be used with --no-include-m-step.")
+
+    layer = gptq.layer
+    W = layer.weight.data.clone()
+    if isinstance(layer, nn.Conv2d):
+        W = W.flatten(1)
+    if isinstance(layer, transformers.Conv1D):
+        W = W.t()
+    W = W.float()
+
+    gptq.tick = time.time()
+    H = gptq.H
+    gptq.G = gptq.H.clone()
+    del gptq.H
+
+    dead = torch.diag(H) == 0
+    H[dead, dead] = 1
+    W[:, dead] = 0
+
+    quantizer = gptq.quantizer
+    vq_dim = quantizer.vq_dim
+    if vq_dim != 1:
+        raise ValueError("--rbvt-placement post_block currently supports GPTVQ vq_dim=1 only.")
+    groupsize = quantizer.get_groupsize(W, args.groupsize)
+    gptq.assignments = []
+
+    vq_scaling_blocksize = quantizer.vq_scaling_blocksize
+    vq_scaling_n_bits = quantizer.vq_scaling_n_bits
+    if vq_scaling_blocksize > 0:
+        raise ValueError("--rbvt-placement post_block currently expects vq_scaling_blocksize <= 0.")
+
+    print(W.shape)
+    print(
+        f"VQ scaling BS {vq_scaling_blocksize} @ {vq_scaling_n_bits}b "
+        f"({quantizer.vq_scaling_domain} domain)"
+    )
+    print(f"Using Hessian-aware K-means {args.hessian_weighted_lookups}")
+    print("RBVT placement: post_block")
+
+    Losses = torch.zeros_like(W)
+    Q = torch.zeros_like(W)
+
+    damp = args.percdamp * torch.mean(torch.diag(H))
+    diag = torch.arange(gptq.columns, device=gptq.dev)
+    H[diag, diag] += damp
+    H = torch.linalg.cholesky(H)
+    H = torch.cholesky_inverse(H)
+    H = torch.linalg.cholesky(H, upper=True)
+    Hinv = H
+
+    totals = {
+        "flips": 0,
+        "candidates": 0,
+        "boundary_kept": 0,
+        "bias_before": 0.0,
+        "bias_after": 0.0,
+        "objective_before": 0.0,
+        "objective_after": 0.0,
+        "variance_increase": 0.0,
+    }
+    mu = mu.to(W.device).float()
+    sigma = sigma.to(W.device).float() if sigma is not None else None
+
+    for i1 in range(0, gptq.columns, args.gptq_blocksize):
+        i2 = min(i1 + args.gptq_blocksize, gptq.columns)
+        count = i2 - i1
+
+        W1 = W[:, i1:i2].clone()
+        W1_start = W1.clone()
+        W1_scaled = W1
+        S1 = torch.ones_like(W1)
+        Q1 = torch.zeros_like(W1)
+        Err1 = torch.zeros_like(W1)
+        Losses1 = torch.zeros_like(W1)
+        Hinv1 = Hinv[i1:i2, i1:i2]
+
+        for i in range(count):
+            if (i1 + i) % groupsize == 0:
+                W_group = W[:, (i1 + i) : (i1 + i + groupsize)]
+                gptq.assignments.append([])
+                quantizer.find_params(W_group, weight=True)
+
+            w = W1[:, i : i + vq_dim]
+            d = torch.diag(Hinv1)[i : i + vq_dim].unsqueeze(0)
+            w_scaled = W1_scaled[:, i : i + vq_dim]
+            s = S1[:, i : i + vq_dim]
+
+            q, assmt = vq_quantize(w_scaled, quantizer, H_inv_diag=None)
+            q = torch.mul(q, s)
+            gptq.assignments[-1].append(assmt)
+
+            Q1[:, i : i + vq_dim] = q
+            Losses1[:, i : i + vq_dim] = (w - q) ** 2 / d**2
+            err1 = (w - q) / d
+            if i + vq_dim < count:
+                update = torch.bmm(
+                    err1.transpose(0, 1).unsqueeze(-1),
+                    Hinv1[i : i + vq_dim, i + vq_dim :].unsqueeze(1),
+                ).sum(0)
+                W1[:, i + vq_dim :] -= update
+                Err1[:, i : i + vq_dim] = err1
+
+        qres = _gptvq_quant_result(
+            W_dequant=Q1,
+            assignments=[gptq.assignments[-1]],
+            centroids=[quantizer.all_centroids[-1]],
+            bits=args.wbits,
+            block_size=count,
+        )
+        dq_diff = (qres.W_dequant.float() - Q1.float()).abs().max().item()
+        if dq_diff >= 1e-4:
+            raise RuntimeError(
+                f"RBVT post-block QuantResult disagrees with Q1 at block {i1}:{i2} "
+                f"(max|diff|={dq_diff:.3e})."
+            )
+        W_corr, stats = apply_rbvt(
+            W_fp=W1_start.to(W.device),
+            qres=qres,
+            mu=mu[i1:i2],
+            sigma_ii=sigma[i1:i2] if sigma is not None and args.rbvt_lambda > 0.0 else None,
+            rbvt_lambda=args.rbvt_lambda,
+            rbvt_topk=args.rbvt_topk if args.rbvt_topk > 0 else None,
+            row_chunk=args.row_chunk,
+            gap_floor=args.gap_floor,
+            strict_descent=args.strict_descent,
+        )
+        if args.strict_descent and stats.objective_after > stats.objective_before * (1 + 1e-6) + 1e-12:
+            raise RuntimeError(
+                f"RBVT post-block objective increased at block {i1}:{i2}: "
+                f"{stats.objective_before:.6e} -> {stats.objective_after:.6e}."
+            )
+        Q1 = W_corr.to(Q1.dtype)
+        d_all = torch.diag(Hinv1).unsqueeze(0).clamp(min=1e-12)
+        Err1 = (W1_start - Q1) / d_all
+        Losses1 = (W1_start - Q1) ** 2 / (d_all**2)
+
+        for total_key in totals:
+            totals[total_key] += getattr(stats, total_key)
+
+        Q[:, i1:i2] = Q1
+        Losses[:, i1:i2] = Losses1 / 2
+        W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+
+    torch.cuda.synchronize() if W.device.type == "cuda" else None
+    print("time %.2f" % (time.time() - gptq.tick))
+    print("error", torch.sum(Losses).item())
+
+    if isinstance(layer, transformers.Conv1D):
+        Q = Q.t()
+    layer.weight.data = Q.reshape(layer.weight.shape).to(layer.weight.data.dtype)
+    return totals
+
+
+@torch.no_grad()
 def quantize_model_gptvq_1d(
     model,
     tokenizer,
@@ -641,19 +806,33 @@ def quantize_model_gptvq_1d(
                 W_fp = module.weight.data.detach().clone().float()
                 print(f"Quantizing {key} with upstream GPTVQ-1D ...")
                 post_block_ncc = correction == "ncc" and args.ncc_placement == "post_block"
-                if post_block_ncc:
+                post_block_rbvt = correction == "rbvt" and args.rbvt_placement == "post_block"
+                if post_block_ncc or post_block_rbvt:
                     if key not in stat_sum:
-                        raise RuntimeError(f"Missing activation stats for NCC layer {key}")
+                        raise RuntimeError(f"Missing activation stats for {correction.upper()} layer {key}")
                     count = max(1, stat_count[key])
                     mu = stat_sum[key].to(device) / count
-                    ncc_stats = _gptvq_fasterquant_ncc_post_block(gptq[name], args=args, mu=mu)
-                    totals["flips"] += ncc_stats["flips"]
-                    totals["bias_before"] += ncc_stats["bias_before"]
-                    totals["bias_after"] += ncc_stats["bias_after"]
-                    totals["objective_before"] += ncc_stats["objective_before"]
-                    totals["objective_after"] += ncc_stats["objective_after"]
-                    for row in ncc_stats["sweep_history"]:
-                        ncc_sweep_history.append({"layer": key, **row})
+                    if post_block_ncc:
+                        ncc_stats = _gptvq_fasterquant_ncc_post_block(gptq[name], args=args, mu=mu)
+                        totals["flips"] += ncc_stats["flips"]
+                        totals["bias_before"] += ncc_stats["bias_before"]
+                        totals["bias_after"] += ncc_stats["bias_after"]
+                        totals["objective_before"] += ncc_stats["objective_before"]
+                        totals["objective_after"] += ncc_stats["objective_after"]
+                        for row in ncc_stats["sweep_history"]:
+                            ncc_sweep_history.append({"layer": key, **row})
+                    else:
+                        ex2 = stat_sumsq[key].to(device) / count
+                        sigma = (ex2 - mu * mu).clamp(min=0.0)
+                        rbvt_stats = _gptvq_fasterquant_rbvt_post_block(
+                            gptq[name],
+                            args=args,
+                            mu=mu,
+                            sigma=sigma,
+                        )
+                        for total_key in totals:
+                            totals[total_key] += rbvt_stats[total_key]
+                        del sigma
                     del mu
                 else:
                     gptq[name].fasterquant(
@@ -688,11 +867,11 @@ def quantize_model_gptvq_1d(
                             X_cpu=X_diag,
                             W_fp=W_fp,
                             W_quant=module.weight.data.detach(),
-                            variant="gptvq_ncc" if post_block_ncc else "gptvq",
+                            variant=f"gptvq_{correction}" if (post_block_ncc or post_block_rbvt) else "gptvq",
                         )
                     )
 
-                if correction is not None and not post_block_ncc:
+                if correction is not None and not post_block_ncc and not post_block_rbvt:
                     if key not in stat_sum:
                         raise RuntimeError(f"Missing activation stats for {correction.upper()} layer {key}")
                     W_gptvq = module.weight.data.detach().float()
@@ -799,6 +978,7 @@ def quantize_model_gptvq_1d(
         if correction == "rbvt":
             stats["rbvt_lambda"] = args.rbvt_lambda
             stats["rbvt_topk"] = args.rbvt_topk
+            stats["rbvt_placement"] = args.rbvt_placement
         if correction == "ncc":
             stats["ncc_budget_p"] = args.ncc_budget_p
             stats["ncc_placement"] = args.ncc_placement
@@ -1061,6 +1241,7 @@ def run_single_pass_compare(args, hf_token: str | None) -> list[dict]:
             "variance_increase",
             "rbvt_lambda",
             "rbvt_topk",
+            "rbvt_placement",
         }
     }
     gptvq_stats["method"] = "gptvq"
@@ -1192,6 +1373,12 @@ def build_parser():
     parser.add_argument("--row-chunk", type=int, default=1024)
     parser.add_argument("--rbvt-lambda", type=float, default=1.0)
     parser.add_argument("--rbvt-topk", type=int, default=0)
+    parser.add_argument(
+        "--rbvt-placement",
+        choices=["post_module", "post_block"],
+        default="post_module",
+        help="Run RBVT after each full Linear module or inside GPTVQ after each GPTQ block.",
+    )
     parser.add_argument("--ncc-budget-p", type=float, default=0.02)
     parser.add_argument(
         "--ncc-placement",
@@ -1255,6 +1442,12 @@ def main():
         raise ValueError("--groupsize must be positive for GPTVQ-1D/RBVT index conversion.")
     if args.rbvt_lambda < 0:
         raise ValueError("--rbvt-lambda must be non-negative.")
+    if args.single_pass_compare and args.rbvt_placement == "post_block":
+        raise ValueError("--rbvt-placement post_block runs one corrected variant and cannot use --single-pass-compare.")
+    if args.rbvt_placement == "post_block" and args.groupsize != args.gptq_blocksize:
+        raise ValueError("--rbvt-placement post_block currently requires --groupsize == --gptq-blocksize.")
+    if args.rbvt_placement == "post_block" and args.include_m_step:
+        raise ValueError("--rbvt-placement post_block requires --no-include-m-step so final M-step does not overwrite RBVT.")
     if not 0.0 < args.ncc_budget_p <= 1.0:
         raise ValueError("--ncc-budget-p must be in (0, 1].")
     if args.ncc_sweeps <= 0:
