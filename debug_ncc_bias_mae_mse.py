@@ -171,6 +171,10 @@ def main():
                          "'cov' = |mu|/((sigma_ii+eps)*g) (NCC-Cov, the derived "
                          "diagonal bias-variance rule). 'cov' passes sigma_ii.")
     ap.add_argument("--cov-eps", type=float, default=1e-6)
+    ap.add_argument("--mse-guard", action="store_true",
+                    help="Only admit flips with gap<2|e| (Cor-2 diagonal safety): "
+                         "each flip reduces both bias and diagonal awMSE. Expect "
+                         "fewer flips, higher bias_after, but awMSE not increasing.")
     ap.add_argument("--baseline", choices=["original", "adjusted"],
                     default="original",
                     help="Which full-precision reference NCC corrects against. "
@@ -349,6 +353,7 @@ def main():
                     score=args.score,
                     sigma_ii=sigma if args.score == "cov" else None,
                     cov_eps=args.cov_eps,
+                    mse_guard=args.mse_guard,
                 )
                 W_corr = W_corr.float()
 
