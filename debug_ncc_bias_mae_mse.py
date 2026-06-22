@@ -140,6 +140,205 @@ def activation_weighted_mse(W_fp, W_q, X) -> float:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def print_summary(rows_report):
+    print("\n================ SUMMARY ================")
+    n = len(rows_report)
+    n_bias_down = sum(r["bias_after"] <= r["bias_before"] + 1e-12 for r in rows_report)
+    n_awmse_up = sum(
+        (r["awmse_after"] == r["awmse_after"])
+        and r["awmse_after"] > r["awmse_before"] * (1 + 1e-6)
+        for r in rows_report
+    )
+    n_awmse_orig_up = sum(
+        (r["awmse_orig_after"] == r["awmse_orig_after"])
+        and r["awmse_orig_after"] > r["awmse_orig_before"] * (1 + 1e-6)
+        for r in rows_report
+    )
+    print(f"layers checked          : {n}")
+    print(f"bias  not increased     : {n_bias_down}/{n}   (Thm 3 -> expect {n}/{n})")
+    print(f"awMSE[base] up          : {n_awmse_up}/{n}   (vs chosen baseline; Thm 4 target 0)")
+    print(f"awMSE[orig] up          : {n_awmse_orig_up}/{n}   (vs ORIGINAL fp = true inference error)")
+    if n_bias_down < n:
+        print("  !! BIAS WENT UP on some layer -> Theorem 3 / no-overshoot VIOLATED. Bug.")
+    if n_awmse_orig_up > 0:
+        print("  ?? awMSE[orig] rose somewhere -> flips hurt true error. Try --mse-guard,")
+        print("     lower --ncc-budget-p, or larger --cov-eps.")
+    print("=========================================")
+
+    up = [r for r in rows_report
+          if (r["awmse_orig_after"] == r["awmse_orig_after"])
+          and r["awmse_orig_after"] > r["awmse_orig_before"] * (1 + 1e-6)]
+    if up:
+        print("\n--- layers where awMSE[orig] increased ---")
+        print(f"{'layer':<30}{'flips':>7}{'bias_d%':>10}{'awMSEo_d%':>11}{'awMSEo_abs_d':>15}")
+        for r in sorted(up, key=lambda x: -x["awmse_orig_d%"]):
+            abs_d = r["awmse_orig_after"] - r["awmse_orig_before"]
+            print(f"{r['layer']:<30}{r['flips']:>7}{r['bias_d%']:>+10.2f}"
+                  f"{r['awmse_orig_d%']:>+11.2f}{abs_d:>15.3e}")
+
+    tot_bias_b = sum(r["bias_before"] for r in rows_report)
+    tot_bias_a = sum(r["bias_after"] for r in rows_report)
+    tot_flips = sum(r["flips"] for r in rows_report)
+    valid = [r for r in rows_report if r["awmse_before"] == r["awmse_before"]]
+    tot_aw_b = sum(r["awmse_before"] for r in valid)
+    tot_aw_a = sum(r["awmse_after"] for r in valid)
+    valid_o = [r for r in rows_report if r["awmse_orig_before"] == r["awmse_orig_before"]]
+    tot_awo_b = sum(r["awmse_orig_before"] for r in valid_o)
+    tot_awo_a = sum(r["awmse_orig_after"] for r in valid_o)
+    print("\n--- NET (summed over checked layers) ---")
+    print(f"total flips      : {tot_flips}")
+    if tot_bias_b > 0:
+        print(f"total bias       : {tot_bias_b:.4e} -> {tot_bias_a:.4e} "
+              f"({(tot_bias_a-tot_bias_b)/tot_bias_b*100:+.2f}%)")
+    if tot_aw_b > 0:
+        net = (tot_aw_a - tot_aw_b) / tot_aw_b * 100
+        v = "NET WIN" if tot_aw_a <= tot_aw_b else "NET REGRESSION"
+        print(f"total act-wMSE[base] : {tot_aw_b:.4e} -> {tot_aw_a:.4e} ({net:+.2f}%)  [{v}]")
+    if tot_awo_b > 0:
+        neto = (tot_awo_a - tot_awo_b) / tot_awo_b * 100
+        vo = "NET WIN" if tot_awo_a <= tot_awo_b else "NET REGRESSION"
+        print(f"total act-wMSE[orig] : {tot_awo_b:.4e} -> {tot_awo_a:.4e} ({neto:+.2f}%)  [{vo}]  <- TRUE inference error")
+    print("=========================================")
+
+
+def run_nf_backend(args, device):
+    """NonUniformGPTQ + NF/codebook quantizer path (the main.py pipeline).
+
+    Quantizes only the first --max-layers DECODER BLOCKS' Linear layers (the rest
+    stay FP), applies NCC on top per layer, and reports the same bias / awMSE
+    metrics as the GPTVQ path. Cheap 2-layer debug of the NF3 path.
+    """
+    from nonuniform_gptq import NonUniformGPTQ, _load_ncc_apply
+    from quantizers import get_quantizer
+
+    apply_ncc = _load_ncc_apply()
+    quantizer = get_quantizer(
+        args.quantizer, nf_block_size=args.nf_block_size,
+        nvfp4_block_size=16, cb_block_size=args.nf_block_size,
+        n_iters=args.kmeans_iters, seed=42,
+    )
+    print(f"[nf] quantizer = {quantizer}")
+
+    tok = AutoTokenizer.from_pretrained(args.model_path, use_fast=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True
+    ).to(device)
+    model.eval()
+    model.config.use_cache = False
+
+    calib_texts = load_calib_texts(args.n_calib)
+
+    # collect the first N decoder blocks' Linear modules, in order
+    blocks = model.model.layers
+    n_blocks = min(args.max_layers, len(blocks))
+    targets = []  # (name, module)
+    for bi in range(n_blocks):
+        for nm, m in blocks[bi].named_modules():
+            if isinstance(m, nn.Linear):
+                targets.append((f"layers.{bi}.{nm}", m))
+
+    rows_report = []
+    for name, module in targets:
+        weight = module.weight.data.detach().clone().float()
+        qres = quantizer.quantize(weight, row_chunk=args.row_chunk)
+        capture = (args.baseline == "adjusted")
+        gptq = NonUniformGPTQ(layer=module, qres=qres, reference_weight=weight)
+
+        stat = {"s": None, "sq": None, "n": 0}
+        xcache = []
+
+        def hook(_m, inp, out):
+            x = inp[0] if isinstance(inp, tuple) else inp
+            gptq.add_batch(x.data, out.data)
+            xf = x.reshape(-1, x.shape[-1]).detach().float()
+            s = xf.sum(0)
+            stat["s"] = s if stat["s"] is None else stat["s"] + s
+            stat["sq"] = (xf * xf).sum(0) if stat["sq"] is None else stat["sq"] + (xf * xf).sum(0)
+            stat["n"] += xf.shape[0]
+            kept = sum(t.shape[0] for t in xcache)
+            if kept < args.diag_max_tokens:
+                xcache.append(xf[: args.diag_max_tokens - kept].detach().cpu().clone())
+
+        h = module.register_forward_hook(hook)
+        try:
+            for i, text in enumerate(calib_texts[: args.n_calib]):
+                enc = tok(text, return_tensors="pt", truncation=True, max_length=args.max_length)
+                enc = {k: v.to(device) for k, v in enc.items()}
+                model(**enc, use_cache=False)
+        finally:
+            h.remove()
+
+        t0 = time.time()
+        err, _ = gptq.fasterquant(
+            blocksize=args.gptq_blocksize, percdamp=args.percdamp,
+            actorder=False, capture_w_assigned=capture,
+        )
+        W_gptq = module.weight.data.detach().float().clone()
+
+        cnt = max(1, stat["n"])
+        mu = (stat["s"] / cnt).to(device).float()
+        sigma = ((stat["sq"] / cnt).to(device).float() - mu * mu).clamp(min=0.0)
+        X = torch.cat(xcache, 0).to(device) if xcache else None
+
+        if args.baseline == "adjusted":
+            W_base = gptq.W_assigned
+            if W_base is None:
+                raise RuntimeError(f"{name}: W_assigned missing (capture failed).")
+            W_base = W_base.to(device).float()
+        else:
+            W_base = weight.to(device)
+
+        m_before = weight_metrics(W_base, W_gptq)
+        bias_before = bias_metric(W_base, W_gptq, mu)
+        awmse_before = activation_weighted_mse(W_base, W_gptq, X) if X is not None else float("nan")
+        awmse_orig_before = activation_weighted_mse(weight.to(device), W_gptq, X) if X is not None else float("nan")
+
+        qres_post = gptq.gptq_quant_result()
+        mu_var_js = (sigma / cnt) if args.ncc_use_james_stein else None
+        W_corr, stats = apply_ncc(
+            W_fp=W_base, qres=qres_post, mu=mu,
+            budget_p=args.ncc_budget_p, use_james_stein=args.ncc_use_james_stein,
+            mu_var=mu_var_js, row_chunk=args.row_chunk,
+            score=args.score, sigma_ii=sigma if args.score == "cov" else None,
+            cov_eps=args.cov_eps, mse_guard=args.mse_guard,
+        )
+        W_corr = W_corr.float()
+
+        m_after = weight_metrics(W_base, W_corr)
+        bias_after = bias_metric(W_base, W_corr, mu)
+        awmse_after = activation_weighted_mse(W_base, W_corr, X) if X is not None else float("nan")
+        awmse_orig_after = activation_weighted_mse(weight.to(device), W_corr, X) if X is not None else float("nan")
+        flips = int(getattr(stats, "flips", -1))
+
+        assert bias_after <= bias_before * (1 + 1e-6) + 1e-12, (
+            f"[{name}] BIAS INCREASED {bias_before:.6e}->{bias_after:.6e}. Thm 3 violated."
+        )
+
+        def pct(a, b):
+            return (b - a) / a * 100.0 if a not in (0.0, float("nan")) else float("nan")
+
+        rows_report.append({
+            "layer": name, "flips": flips,
+            "bias_before": bias_before, "bias_after": bias_after, "bias_d%": pct(bias_before, bias_after),
+            "mse_before": m_before["mse"], "mse_after": m_after["mse"], "mse_d%": pct(m_before["mse"], m_after["mse"]),
+            "awmse_before": awmse_before, "awmse_after": awmse_after, "awmse_d%": pct(awmse_before, awmse_after),
+            "awmse_orig_before": awmse_orig_before, "awmse_orig_after": awmse_orig_after,
+            "awmse_orig_d%": pct(awmse_orig_before, awmse_orig_after),
+        })
+        module.weight.data = W_corr.reshape(module.weight.shape).to(module.weight.dtype)
+        gptq.free()
+        print(
+            f"  {name:<30} flips={flips:>7} | "
+            f"bias {bias_before:.4e}->{bias_after:.4e} ({pct(bias_before,bias_after):+.2f}%) | "
+            f"awMSE[base] {awmse_before:.4e}->{awmse_after:.4e} ({pct(awmse_before,awmse_after):+.2f}%) | "
+            f"awMSE[orig] {awmse_orig_before:.4e}->{awmse_orig_after:.4e} ({pct(awmse_orig_before,awmse_orig_after):+.2f}%)"
+        )
+
+    print_summary(rows_report)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", default="meta-llama/Llama-3.1-8B")
@@ -185,16 +384,29 @@ def main():
                          "view). Bias is measured vs the chosen baseline; MAE/MSE/"
                          "awMSE are ALWAYS measured vs the original (true inference "
                          "error).")
+    ap.add_argument("--backend", choices=["gptvq", "nf"], default="gptvq",
+                    help="gptvq = GPTVQ-1D learned scalar codebook (k-means). "
+                         "nf = NonUniformGPTQ + a NormalFloat/codebook quantizer "
+                         "(the main.py path). Both apply NCC on top identically.")
+    ap.add_argument("--quantizer", default="nf3",
+                    help="(backend=nf only) quantizer name passed to get_quantizer, "
+                         "e.g. nf3, nf4, nvfp4, codebook3, codebook4.")
+    ap.add_argument("--nf-block-size", type=int, default=64)
     # diagnostics
     ap.add_argument("--diag-max-tokens", type=int, default=4096,
                     help="cap tokens kept for activation-weighted MSE")
     args = ap.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"[setup] device={device} model={args.model_path} "
-          f"max_layers={args.max_layers} bits={args.wbits} gs={args.groupsize} "
+    print(f"[setup] backend={args.backend} device={device} model={args.model_path} "
+          f"max_layers={args.max_layers} "
+          f"{'quant='+args.quantizer if args.backend=='nf' else 'bits='+str(args.wbits)} "
           f"score={args.score} budget_p={args.ncc_budget_p} "
-          f"baseline={args.baseline}")
+          f"baseline={args.baseline} mse_guard={args.mse_guard}")
+
+    if args.backend == "nf":
+        return run_nf_backend(args, device)
+    # else: fall through to the existing GPTVQ path below
 
     # ---- load model & tokenizer ----
     tok = AutoTokenizer.from_pretrained(args.model_path, use_fast=True)
@@ -457,86 +669,7 @@ def main():
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # ---- summary + sanity checks ----
-    print("\n================ SUMMARY ================")
-    n_bias_down = sum(r["bias_after"] <= r["bias_before"] + 1e-12 for r in rows_report)
-    n_mse_up = sum(r["mse_after"] > r["mse_before"] * (1 + 1e-6) for r in rows_report)
-    n_awmse_up = sum(
-        (r["awmse_after"] == r["awmse_after"])  # not NaN
-        and r["awmse_after"] > r["awmse_before"] * (1 + 1e-6)
-        for r in rows_report
-    )
-    n = len(rows_report)
-    n_awmse_orig_up = sum(
-        (r["awmse_orig_after"] == r["awmse_orig_after"])
-        and r["awmse_orig_after"] > r["awmse_orig_before"] * (1 + 1e-6)
-        for r in rows_report
-    )
-    print(f"layers checked          : {n}")
-    print(f"bias  not increased     : {n_bias_down}/{n}   (Thm 3 -> expect {n}/{n})")
-    print(f"awMSE[base] up          : {n_awmse_up}/{n}   (vs chosen baseline; Thm 4 target 0)")
-    print(f"awMSE[orig] up          : {n_awmse_orig_up}/{n}   (vs ORIGINAL fp = true inference error)")
-    if n_bias_down < n:
-        print("  !! BIAS WENT UP on some layer -> Theorem 3 / no-overshoot VIOLATED. Bug.")
-    if n_awmse_up > 0:
-        print("  ?? awMSE[base] rose -> check budget_p / gap / score=cov (Thm 4).")
-    if n_awmse_orig_up > n_awmse_up:
-        print("  !! awMSE[orig] rises on MORE layers than awMSE[base]: the chosen")
-        print("     baseline is reducing a self-referential bias while INCREASING")
-        print("     true inference error. With baseline=adjusted this means NCC is")
-        print("     undoing GPTVQ's error-feedback. Prefer baseline=original.")
-    print("=========================================")
-
-    # ---- which layers raised act-weighted MSE, and by how much ----
-    up = [r for r in rows_report
-          if (r["awmse_after"] == r["awmse_after"])
-          and r["awmse_after"] > r["awmse_before"] * (1 + 1e-6)]
-    if up:
-        print("\n--- layers where act-weighted MSE increased ---")
-        print(f"{'layer':<30}{'flips':>7}{'bias_d%':>10}{'awMSE_d%':>11}"
-              f"{'awMSE_abs_d':>14}")
-        for r in sorted(up, key=lambda x: -x["awmse_d%"]):
-            abs_d = r["awmse_after"] - r["awmse_before"]
-            print(f"{r['layer']:<30}{r['flips']:>7}{r['bias_d%']:>+10.2f}"
-                  f"{r['awmse_d%']:>+11.2f}{abs_d:>14.3e}")
-
-    # ---- NET effect across all layers (the number that actually matters) ----
-    # If the summed absolute act-weighted MSE goes DOWN overall, NCC is a net
-    # win even if a few layers individually tick up. Theorem 4 is per-move
-    # sufficient, not per-layer necessary; the aggregate is the honest verdict.
-    tot_bias_b = sum(r["bias_before"] for r in rows_report)
-    tot_bias_a = sum(r["bias_after"] for r in rows_report)
-    valid = [r for r in rows_report if r["awmse_before"] == r["awmse_before"]]
-    tot_aw_b = sum(r["awmse_before"] for r in valid)
-    tot_aw_a = sum(r["awmse_after"] for r in valid)
-    print("\n--- NET (summed over checked layers) ---")
-    tot_flips = sum(r["flips"] for r in rows_report)
-    print(f"total flips      : {tot_flips}")
-    if tot_bias_b > 0:
-        print(f"total bias       : {tot_bias_b:.4e} -> {tot_bias_a:.4e} "
-              f"({(tot_bias_a-tot_bias_b)/tot_bias_b*100:+.2f}%)")
-    if tot_aw_b > 0:
-        net = (tot_aw_a - tot_aw_b) / tot_aw_b * 100
-        verdict = "NET WIN" if tot_aw_a <= tot_aw_b else "NET REGRESSION"
-        print(f"total act-wMSE[base] : {tot_aw_b:.4e} -> {tot_aw_a:.4e} "
-              f"({net:+.2f}%)  [{verdict}]")
-    valid_o = [r for r in rows_report
-               if r["awmse_orig_before"] == r["awmse_orig_before"]]
-    tot_awo_b = sum(r["awmse_orig_before"] for r in valid_o)
-    tot_awo_a = sum(r["awmse_orig_after"] for r in valid_o)
-    if tot_awo_b > 0:
-        neto = (tot_awo_a - tot_awo_b) / tot_awo_b * 100
-        verdicto = "NET WIN" if tot_awo_a <= tot_awo_b else "NET REGRESSION"
-        print(f"total act-wMSE[orig] : {tot_awo_b:.4e} -> {tot_awo_a:.4e} "
-              f"({neto:+.2f}%)  [{verdicto}]  <- TRUE inference error")
-    print("=========================================")
-
-    print("\nNote on the two MSE columns:")
-    print("  * weight-MSE (mean (W_q-W)^2) is NOT what NCC protects; a complementary")
-    print("    flip moves a weight by one full gap, so raw weight-MSE CAN rise. That is")
-    print("    expected and not a violation by itself.")
-    print("  * act-weighted MSE (mean (x^T e)^2) is the R_l proxy Theorem 4 bounds.")
-    print("    THIS is the one that should not increase. Watch the 'act-weighted MSE up'")
-    print("    counter above.")
+    print_summary(rows_report)
 
 
 if __name__ == "__main__":
