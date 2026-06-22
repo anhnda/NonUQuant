@@ -1,3 +1,38 @@
+
+Qwen2.5 
+
+MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B/snapshots/d149729398750b98c0af14eb82c78cfe92750796  \
+QUANTIZER=nf3 DEVICE=cuda:0 \
+N_CALIB=128 COV_EPS=1e-2 \
+RUN_NCC_COV_ADJ=0 RUN_NCC_LITE_ORIG=0 \
+OUT_ROOT=./runs_nf3_qwen \
+bash run_gptq_ncc.sh
+
+
+Llama 3.1
+MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b \
+QUANTIZER=nf3 DEVICE=cuda:0 \
+N_CALIB=128 COV_EPS=1e-2 \
+RUN_NCC_COV_ADJ=0 RUN_NCC_LITE_ORIG=0 \
+OUT_ROOT=./runs_nf3 \
+bash run_gptq_ncc.sh
+
+
+Mistral 7B 
+MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--mistralai--Mistral-7B-v0.3/snapshots/caa1feb0e54d415e2df31207e5f4e273e33509b1  \
+QUANTIZER=nf3 DEVICE=cuda:0 \
+N_CALIB=128 COV_EPS=1e-2 \
+RUN_NCC_COV_ADJ=0 RUN_NCC_LITE_ORIG=0 \
+OUT_ROOT=./runs_nf3_mistral \
+bash run_gptq_ncc.sh
+
+
+
+
+
+
+
+
 python debug_ncc_bias_mae_mse.py \
         --model-path /home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b \
         --device cuda:0 \
@@ -33,6 +68,8 @@ python debug_ncc_bias_mae_mse.py \
         --ncc-sweeps 1 --baseline original
 
 
+
+Llama 3.1
 MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b QUANTIZER=nf4 DEVICE=cuda:0 bash run_gptq_ncc.sh
 
 
@@ -41,21 +78,3 @@ QUANTIZER=nf4 \
 DEVICE=cuda:0 \
 bash run_gptq_ncc.sh
 
-
-MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b \
-QUANTIZER=nf3 DEVICE=cuda:0 \
-N_CALIB=128 COV_EPS=1e-2 \
-RUN_NCC_COV_ADJ=0 RUN_NCC_LITE_ORIG=0 \
-OUT_ROOT=./runs_nf3 \
-bash run_gptq_ncc.sh
-
-
-Mistral 7B 
-
-
-MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--mistralai--Mistral-7B-v0.3/snapshots/caa1feb0e54d415e2df31207e5f4e273e33509b1  \
-QUANTIZER=nf3 DEVICE=cuda:0 \
-N_CALIB=128 COV_EPS=1e-2 \
-RUN_NCC_COV_ADJ=0 RUN_NCC_LITE_ORIG=0 \
-OUT_ROOT=./runs_nf3_mistral \
-bash run_gptq_ncc.sh
