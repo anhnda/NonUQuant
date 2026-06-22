@@ -524,7 +524,7 @@ def build_parser():
     p = argparse.ArgumentParser(description="RBVTQuant main entrypoint: quantize + perplexity eval")
     p.add_argument("--model-path", type=str, required=True, help="HF model name or local path")
     p.add_argument("--device", type=str, default="cuda:0", help="Device for model loading/eval, e.g. cuda:0, cuda:1, cpu, or auto")
-    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt", "gptq"], help="Run mode")
+    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt", "gptq", "gptvq"], help="Run mode")
     p.add_argument("--quantizer", type=str, default="nf4", choices=["nf3", "nf4", "nvfp4", "codebook3", "codebook4"])
     p.add_argument("--output-dir", type=str, default="./quantized_model")
 
@@ -570,6 +570,39 @@ def build_parser():
                    help="Only admit flips with gap<2|e| (Cor-2 diagonal safety): "
                         "each flip then reduces both bias and diagonal awMSE. "
                         "Trades bias-reduction for guaranteed no-awMSE-increase.")
+
+    # --- GPTVQ-1D (method=gptvq): upstream GPTVQ scalar VQ + NCC correction ---
+    p.add_argument("--wbits", type=int, default=4, choices=[3, 4],
+                   help="(method=gptvq) GPTVQ-1D bit-width.")
+    p.add_argument("--groupsize", type=int, default=128,
+                   help="(method=gptvq) GPTVQ-1D codebook group size.")
+    p.add_argument("--kmeans-init-method", choices=["cdf", "kpp", "mahalanobis"], default="mahalanobis",
+                   help="(method=gptvq) GPTVQ-1D k-means centroid initialisation.")
+    p.add_argument("--assignment-chunk-size", type=int, default=4096,
+                   help="(method=gptvq) GPTVQ-1D assignment chunk size.")
+    p.add_argument("--kpp-n-subsample", type=int, default=10000,
+                   help="(method=gptvq) GPTVQ-1D k-means++ subsample (-1 = all).")
+    p.add_argument("--sym", dest="sym", action="store_true", default=False,
+                   help="(method=gptvq) symmetric GPTVQ-1D scaling.")
+    p.add_argument("--include-m-step", dest="include_m_step", action="store_true", default=True)
+    p.add_argument("--no-include-m-step", dest="include_m_step", action="store_false")
+    p.add_argument("--hessian-weighted-lookups", dest="hessian_weighted_lookups", action="store_true", default=True)
+    p.add_argument("--no-hessian-weighted-lookups", dest="hessian_weighted_lookups", action="store_false")
+    p.add_argument("--true-sequential", dest="true_sequential", action="store_true", default=True)
+    p.add_argument("--no-true-sequential", dest="true_sequential", action="store_false")
+    p.add_argument("--keep-model-on-device", dest="keep_model_on_device", action="store_true", default=False,
+                   help="(method=gptvq) keep the full model on --device during quantization.")
+    # GPTVQ-1D NCC sweep controls (reuses --ncc-budget-p / --ncc-james-stein above)
+    p.add_argument("--ncc-placement", choices=["post_module", "post_block"], default="post_module",
+                   help="(method=gptvq) run NCC after each Linear module or inside GPTVQ after each GPTQ block.")
+    p.add_argument("--ncc-sweeps", type=int, default=1,
+                   help="(method=gptvq) number of iterative NCC correction sweeps per layer.")
+    p.add_argument("--ncc-stop-eps", type=float, default=0.0,
+                   help="(method=gptvq) stop NCC sweeps when bias improvement <= this value.")
+    p.add_argument("--gptvq-diagnostic-layer-limit", dest="diagnostic_layer_limit", type=int, default=0,
+                   help="(method=gptvq) number of early Linear layers for activation-error diagnostics.")
+    p.add_argument("--gptvq-diagnostic-max-tokens", dest="diagnostic_max_tokens", type=int, default=4096,
+                   help="(method=gptvq) max calibration tokens retained per diagnostic layer.")
 
     p.add_argument("--eval-stride", type=int, default=512)
     p.add_argument("--eval-max-length", type=int, default=2048)
@@ -656,7 +689,30 @@ def main():
         seqlen=args.max_length,
         seed=args.seed,
     )
-    if args.method == "gptq":
+    if args.method == "gptvq":
+        # GPTVQ-1D (upstream Qualcomm GPTVQ scalar VQ codebook) + NCC first-moment
+        # correction. Reuses the verified pipeline from gptvq_rbvt_benchmark so the
+        # codebook / QuantResult / NCC interfaces never drift from the debug harness.
+        # Imported lazily: importing the benchmark module sets up sys.path for the
+        # ./GPTVQ checkout and the transformers.Conv1D shim, so it must only run when
+        # this method is actually selected.
+        from gptvq_rbvt_benchmark import quantize_model_gptvq_1d
+
+        # The benchmark pipeline reads args.percdamp (main.py exposes --gptq-percdamp).
+        if not hasattr(args, "percdamp"):
+            args.percdamp = args.gptq_percdamp
+        # The benchmark NCC sweeps read args.ncc_use_james_stein; main.py stores the
+        # same flag under args.ncc_james_stein (--ncc-james-stein).
+        args.ncc_use_james_stein = args.ncc_james_stein
+        gptvq_stats = quantize_model_gptvq_1d(
+            model=model,
+            tokenizer=tokenizer,
+            calib_texts=calib_texts,
+            args=args,
+            correction="ncc",
+        )
+        quant_stats = gptvq_stats
+    elif args.method == "gptq":
         model, gptq_stats = quantize_model_gptq(
             model=model,
             tokenizer=tokenizer,
