@@ -85,8 +85,8 @@ python debug_ncc_bias_mae_mse.py \
         --max-length 512 \
         --groupsize 128 \
         --wbits 3 \
-        --score cov --ncc-budget-p 0.02 \
-        --ncc-sweeps 1 --baseline original
+        --score cov --ncc-budget-p 0.005 \
+        --ncc-sweeps 1 --baseline original 
 
 
 
@@ -107,3 +107,13 @@ RUN_NCC_COV_ADJ=0 RUN_NCC_LITE_ORIG=0 \
 OUT_ROOT=./runs_nf3_qwen_p005 \
 bash run_gptq_ncc.sh
 
+python debug_ncc_bias_mae_mse.py \
+        --model-path /home/DATA/prometheus/anh/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B/snapshots/d149729398750b98c0af14eb82c78cfe92750796 \
+        --device cuda:0 \
+        --max-layers 2 \
+        --n-calib 128 \
+        --max-length 512 \
+        --groupsize 128 \
+        --wbits 3 \
+        --score cov --ncc-budget-p 0.005 \
+        --ncc-sweeps 1 --baseline original --mse_guard
