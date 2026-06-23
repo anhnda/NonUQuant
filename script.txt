@@ -1,8 +1,8 @@
 MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B/snapshots/d149729398750b98c0af14eb82c78cfe92750796 \
 DEVICE=cuda:0 N_CALIB=128 WBITS=3 GROUPSIZE=128 \
-BUDGET_P=0.005 NCC_SWEEPS=1 \
+NCC_SCORE=cov COV_EPS=1e-2 MSE_GUARD=1 BUDGET_P=0.005 \
 RUN_BASE=1 RUN_NCC_POST_MODULE=1 RUN_NCC_POST_BLOCK=0 \
-OUT_ROOT=./runs_gptvq3_qwen_b005 \
+OUT_ROOT=./runs_gptvq3_qwen_guard_005 \
 bash run_gptvq_ncc.sh
 
 
@@ -116,4 +116,4 @@ python debug_ncc_bias_mae_mse.py \
         --groupsize 128 \
         --wbits 3 \
         --score cov --ncc-budget-p 0.005 \
-        --ncc-sweeps 1 --baseline original --mse_guard
+        --ncc-sweeps 1 --baseline original --mse-guard

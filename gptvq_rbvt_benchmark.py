@@ -359,6 +359,15 @@ def _apply_ncc_sweeps(
     first_bias_before = None
     final_bias_after = None
 
+    # NCC scoring / safety knobs. mse_guard (Cor-2 diagonal safety) only reduces
+    # awMSE when the diagonal activation variance is supplied, so it pairs with
+    # score="cov" and sigma_ii=mu_var. These default off / "lite" when the args
+    # are absent so older callers keep the previous behaviour.
+    ncc_score = getattr(args, "ncc_score", "lite")
+    ncc_mse_guard = getattr(args, "ncc_mse_guard", False)
+    ncc_cov_eps = getattr(args, "ncc_cov_eps", 1e-6)
+    sigma_ii = mu_var if (ncc_score == "cov" or ncc_mse_guard) else None
+
     for sweep_idx in range(args.ncc_sweeps):
         W_corr, stats = apply_ncc(
             W_fp=W_fp,
@@ -368,6 +377,10 @@ def _apply_ncc_sweeps(
             use_james_stein=args.ncc_use_james_stein,
             mu_var=mu_var,
             row_chunk=args.row_chunk,
+            score=ncc_score,
+            sigma_ii=sigma_ii,
+            cov_eps=ncc_cov_eps,
+            mse_guard=ncc_mse_guard,
         )
         bias_before = float(stats.bias_before)
         bias_after = float(stats.bias_after)

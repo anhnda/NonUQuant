@@ -49,6 +49,9 @@ CALIB_DS="${CALIB_DS:-c4}"                    # c4|wikitext2
 BUDGET_P="${BUDGET_P:-0.02}"
 NCC_SWEEPS="${NCC_SWEEPS:-1}"
 NCC_STOP_EPS="${NCC_STOP_EPS:-0.0}"
+NCC_SCORE="${NCC_SCORE:-cov}"                 # cov|lite (mse-guard needs cov)
+COV_EPS="${COV_EPS:-1e-6}"
+MSE_GUARD="${MSE_GUARD:-0}"          # 1 -> add --ncc-mse-guard (gap<2|e| Cor-2 filter)
 JAMES_STEIN="${JAMES_STEIN:-0}"               # 1 -> --ncc-james-stein
 GPTQ_BLOCKSIZE="${GPTQ_BLOCKSIZE:-128}"
 GPTQ_PERCDAMP="${GPTQ_PERCDAMP:-0.01}"
@@ -162,9 +165,10 @@ PYEOF
   fi
 }
 
-# optional James-Stein flag appended to NCC variants
-JS_FLAG=""
-if [[ "$JAMES_STEIN" == "1" ]]; then JS_FLAG="--ncc-james-stein"; fi
+# NCC scoring + safety flags shared by the NCC variants.
+ncc_flags=(--ncc-score "$NCC_SCORE" --ncc-cov-eps "$COV_EPS")
+[[ "$MSE_GUARD"   == "1" ]] && ncc_flags+=(--ncc-mse-guard)
+[[ "$JAMES_STEIN" == "1" ]] && ncc_flags+=(--ncc-james-stein)
 
 # 1) GPTVQ-1D base ------------------------------------------------------------
 # The gptvq branch always runs NCC sweeps; budget_p=0 admits no flips, so this is
@@ -178,7 +182,7 @@ fi
 if [[ "$RUN_NCC_POST_MODULE" == "1" ]]; then
   run_variant "ncc_post_module" \
     --ncc-budget-p "$BUDGET_P" --ncc-sweeps "$NCC_SWEEPS" \
-    --ncc-stop-eps "$NCC_STOP_EPS" --ncc-placement post_module $JS_FLAG
+    --ncc-stop-eps "$NCC_STOP_EPS" --ncc-placement post_module "${ncc_flags[@]}"
 fi
 
 # 3) GPTVQ-1D + NCC, post_block -----------------------------------------------
@@ -187,7 +191,7 @@ if [[ "$RUN_NCC_POST_BLOCK" == "1" ]]; then
   run_variant "ncc_post_block" \
     --ncc-budget-p "$BUDGET_P" --ncc-sweeps "$NCC_SWEEPS" \
     --ncc-stop-eps "$NCC_STOP_EPS" --ncc-placement post_block \
-    --no-include-m-step $JS_FLAG
+    --no-include-m-step "${ncc_flags[@]}"
 fi
 
 echo ""
