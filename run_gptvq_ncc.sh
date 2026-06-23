@@ -35,7 +35,7 @@ OUT_ROOT="${OUT_ROOT:-./runs_gptvq_ncc}"
 # ---- GPTVQ-1D codebook knobs ------------------------------------------------
 WBITS="${WBITS:-3}"                           # 3|4
 GROUPSIZE="${GROUPSIZE:-128}"
-KMEANS_ITERS="${KMEANS_ITERS:-20}"
+KMEANS_ITERS="${KMEANS_ITERS:-100}"
 KMEANS_INIT="${KMEANS_INIT:-mahalanobis}"     # cdf|kpp|mahalanobis
 INCLUDE_M_STEP="${INCLUDE_M_STEP:-1}"         # 1 -> M-step on, 0 -> --no-include-m-step
 HESSIAN_LOOKUPS="${HESSIAN_LOOKUPS:-1}"       # 1 -> on, 0 -> --no-hessian-weighted-lookups
