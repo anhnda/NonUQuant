@@ -546,7 +546,7 @@ def build_parser():
     p.add_argument("--nf-block-size", type=int, default=64)
     p.add_argument("--nvfp4-block-size", type=int, default=16)
     p.add_argument("--cb-block-size", type=int, default=64)
-    p.add_argument("--kmeans-iters", type=int, default=20)
+    p.add_argument("--kmeans-iters", type=int, default=100)
     p.add_argument("--row-chunk", type=int, default=1024)
     p.add_argument("--gptq-blocksize", type=int, default=128)
     p.add_argument("--gptq-percdamp", type=float, default=0.01)
