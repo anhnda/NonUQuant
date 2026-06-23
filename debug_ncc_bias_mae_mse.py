@@ -351,7 +351,7 @@ def main():
     ap.add_argument("--groupsize", type=int, default=128)
     ap.add_argument("--gptq-blocksize", type=int, default=128)
     ap.add_argument("--percdamp", type=float, default=0.01)
-    ap.add_argument("--kmeans-iters", type=int, default=20)
+    ap.add_argument("--kmeans-iters", type=int, default=100)
     ap.add_argument("--kmeans-init-method", default="mahalanobis")
     ap.add_argument("--assignment-chunk-size", type=int, default=4096)
     ap.add_argument("--kpp-n-subsample", type=int, default=-1)
