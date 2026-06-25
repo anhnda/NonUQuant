@@ -41,7 +41,6 @@ import torch.nn as nn
 import debug_ncc_mse_lnq as _dbg
 
 
-@torch.no_grad()
 def _collect_layer_stats(
     *,
     model,
@@ -277,7 +276,6 @@ def _quantize_one_linear(
     return row
 
 
-@torch.no_grad()
 def quantize_model_lnq(
     *,
     model,
@@ -299,6 +297,14 @@ def quantize_model_lnq(
         raise RuntimeError("LNQ backbone expects a Llama-like model with model.model.layers")
 
     model.config.use_cache = False
+    if args.guided:
+        # The guided saliency Hessian needs a real backward pass on the LM loss.
+        # HF inference loads can leave params with requires_grad=False (and the
+        # caller may have frozen them); re-enable so out.loss has a grad_fn.
+        # Quantization itself stays gradient-free via _quantize_one_linear's
+        # @torch.no_grad() and the non-guided forward's `with torch.no_grad()`.
+        for p in model.parameters():
+            p.requires_grad_(True)
     blocks = model.model.layers
     max_layers = getattr(args, "max_layers", 0) or len(blocks)
     n_blocks = min(max_layers, len(blocks))
