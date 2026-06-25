@@ -4,7 +4,7 @@ import glog
 import torch
 from torch import nn
 
-from lib.linear.quantized_linear import QuantizedLinear
+from GuidedQuant.qtip.lib.linear.quantized_linear import QuantizedLinear
 
 @torch.compile
 def convert_args(args, kwargs, device, dtype):

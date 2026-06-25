@@ -50,7 +50,7 @@ from transformers.utils import (
 )
 from transformers.models.llama.configuration_llama import LlamaConfig
 
-from train_utils.quant_linear import QuantizeLinear
+from GuidedQuant.spin_quant.train_utils.quant_linear import QuantizeLinear
 
 
 logger = logging.get_logger(__name__)

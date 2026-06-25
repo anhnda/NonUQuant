@@ -14,7 +14,7 @@ import os
 import torch
 from tqdm import tqdm
 
-from utils import model_utils
+from GuidedQuant.spin_quant.utils.utils import model_utils
 
 
 @torch.no_grad()

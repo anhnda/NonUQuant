@@ -10,8 +10,8 @@ from lm_eval import evaluator, tasks
 from lm_eval.models.huggingface import HFLM
 from transformers import AutoTokenizer
 
-from lib.linear import QuantizedLinear
-from lib.utils.unsafe_import import model_from_hf_path
+from GuidedQuant.qtip.lib.linear import QuantizedLinear
+from GuidedQuant.qtip.lib.utils.unsafe_import import model_from_hf_path
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
 

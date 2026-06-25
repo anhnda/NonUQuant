@@ -14,11 +14,12 @@ import math
 import pprint
 import time
 
+from GuidedQuant.spin_quant.utils import quant_utils
 import torch
 import torch.nn as nn
 import tqdm
 
-from utils import quant_utils, utils
+from GuidedQuant.spin_quant.utils import utils
 
 
 class GPTQ:

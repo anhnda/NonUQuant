@@ -46,7 +46,7 @@ from transformers.utils import (add_start_docstrings,
                                 is_torchdynamo_compiling, logging,
                                 replace_return_docstrings)
 
-from lib.linear.quantized_linear import QuantizedLinear
+from GuidedQuant.qtip.lib.linear.quantized_linear import QuantizedLinear
 
 logger = logging.get_logger(__name__)
 

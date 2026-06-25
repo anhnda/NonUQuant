@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from plugin import *
+from GuidedQuant.inference.plugin import *
 
 class LUTGEMMLinear(nn.Module):
     def __init__(self, in_features, out_features, bitwidth, group_size, bias=False, dtype=torch.half):

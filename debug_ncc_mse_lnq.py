@@ -257,10 +257,36 @@ def bias_metric(W_fp: torch.Tensor, W_q: torch.Tensor, mu: torch.Tensor) -> floa
 
 @torch.no_grad()
 def activation_weighted_mse(W_fp, W_q, X) -> float:
-    """R_l proxy: mean over tokens & channels of (x^T e)^2. X [tokens, in]."""
+    """R_l proxy: mean over tokens & channels of (x^T e)^2. X [tokens, in].
+
+    This is the FULL quadratic form e^T (X^T X) e, off-diagonal included. It is
+    NOT what the mse_guard / Corollary 2 controls (the guard only bounds the
+    DIAGONAL term, see diagonal_awmse below).
+    """
     e = (W_q - W_fp).float()              # [out, in]
     yerr = X.float() @ e.t()              # [tokens, out]
     return (yerr * yerr).mean().item()
+
+
+@torch.no_grad()
+def diagonal_awmse(W_fp, W_q, sigma_ii) -> float:
+    """Diagonal-only activation-weighted MSE: sum_ij sigma_ii * e_ij^2.
+
+    This is the EXACT quantity Corollary 2 / the mse_guard controls. Each guarded
+    flip changes it by sigma_ii * gap * (gap - 2|e_i|) <= 0, so with --mse-guard
+    this must be NON-INCREASING per layer regardless of the off-diagonal Sigma.
+    The gap between this and the full awMSE is precisely the off-diagonal
+    cross-term 2<Delta, Sigma_offdiag e> + tr(Delta^T Sigma_offdiag Delta) that the
+    diagonal certificate says nothing about.
+
+    Returned on the SAME scale as activation_weighted_mse: full awMSE divides by
+    (tokens * out); the diagonal form has no token axis, so we normalise by `out`
+    only and report it as a per-output-channel mean of sum_i sigma_ii e_i^2. The
+    two columns are therefore comparable in trend, not in absolute value.
+    """
+    e = (W_q - W_fp).float()              # [out, in]
+    s = sigma_ii.float().unsqueeze(0)     # [1, in]
+    return ((e * e) * s).sum().item() / e.shape[0]
 
 
 # ---------------------------------------------------------------------------
@@ -380,15 +406,23 @@ def print_summary(rows_report):
         and r["awmse_orig_after"] > r["awmse_orig_before"] * (1 + 1e-6)
         for r in rows_report
     )
+    n_diag_up = sum(
+        r.get("diag_after", float("nan")) > r.get("diag_before", float("nan")) * (1 + 1e-6)
+        for r in rows_report
+    )
     print(f"layers checked          : {n}")
     print(f"bias  not increased     : {n_bias_down}/{n}   (Thm 3 -> expect {n}/{n})")
-    print(f"awMSE[base] up          : {n_awmse_up}/{n}   (vs LNQ baseline; Thm 4 target 0)")
+    print(f"awMSE[base] up          : {n_awmse_up}/{n}   (FULL form, off-diag included; Thm 4 target 0)")
     print(f"awMSE[orig] up          : {n_awmse_orig_up}/{n}   (vs ORIGINAL fp = true inference error)")
+    print(f"diag-awMSE up           : {n_diag_up}/{n}   (Cor 2 / mse_guard controls THIS; expect 0 w/ --mse-guard)")
     if n_bias_down < n:
         print("  !! BIAS WENT UP on some layer -> Theorem 3 / no-overshoot VIOLATED. Bug.")
+    if n_diag_up > 0:
+        print("  !! DIAGONAL awMSE up -> the mse_guard per-move filter (gap<2|e|) is broken in ncc.py.")
     if n_awmse_orig_up > 0:
-        print("  ?? awMSE[orig] rose somewhere -> flips hurt true error. Try --mse-guard,")
-        print("     lower --ncc-budget-p, or larger --cov-eps.")
+        print("  ?? FULL awMSE rose while diag may be flat -> regression is the OFF-DIAGONAL")
+        print("     cross-term, which the diagonal certificate does NOT control. Not a guard bug.")
+        print("     Lower --ncc-budget-p, larger --cov-eps, or accept it (honest negative result).")
     print("=========================================")
 
     up = [r for r in rows_report
@@ -424,6 +458,15 @@ def print_summary(rows_report):
         neto = (tot_awo_a - tot_awo_b) / tot_awo_b * 100
         vo = "NET WIN" if tot_awo_a <= tot_awo_b else "NET REGRESSION"
         print(f"total act-wMSE[orig] : {tot_awo_b:.4e} -> {tot_awo_a:.4e} ({neto:+.2f}%)  [{vo}]  <- TRUE inference error")
+    diag_rows = [r for r in rows_report if "diag_before" in r]
+    if diag_rows:
+        tot_d_b = sum(r["diag_before"] for r in diag_rows)
+        tot_d_a = sum(r["diag_after"] for r in diag_rows)
+        if tot_d_b > 0:
+            netd = (tot_d_a - tot_d_b) / tot_d_b * 100
+            vd = "NET WIN" if tot_d_a <= tot_d_b else "NET REGRESSION"
+            print(f"total diag-awMSE     : {tot_d_b:.4e} -> {tot_d_a:.4e} ({netd:+.2f}%)  [{vd}]  <- what Cor 2 controls")
+            print("  (gap diag-vs-full = off-diagonal cross-term, outside the diagonal certificate)")
     print("=========================================")
 
 
@@ -502,6 +545,8 @@ def run_lnq_layer(
     bias_before = bias_metric(W_base, W_lnq, mu)
     awmse_before = activation_weighted_mse(W_base, W_lnq, X) if X is not None else float("nan")
     awmse_orig_before = activation_weighted_mse(W_fp, W_lnq, X) if X is not None else float("nan")
+    # diagonal-only awMSE = the EXACT quantity Corollary 2 / mse_guard controls.
+    diag_before = diagonal_awmse(W_base, W_lnq, sigma)
 
     # ---- apply NCC (same call the real pipeline uses) ----
     mu_var_js = (sigma / cnt) if args.ncc_use_james_stein else None
@@ -525,6 +570,7 @@ def run_lnq_layer(
     bias_after = bias_metric(W_base, W_corr, mu)
     awmse_after = activation_weighted_mse(W_base, W_corr, X) if X is not None else float("nan")
     awmse_orig_after = activation_weighted_mse(W_fp, W_corr, X) if X is not None else float("nan")
+    diag_after = diagonal_awmse(W_base, W_corr, sigma)
     flips = int(getattr(stats, "flips", -1))
 
     # ---- cross-check NCC-internal bias vs external B_hat (same baseline) ----
@@ -556,6 +602,18 @@ def run_lnq_layer(
         f"Theorem 3 / no-overshoot VIOLATED on the realised tensor."
     )
 
+    # ---- Corollary 2 invariant: with --mse-guard the DIAGONAL awMSE (the only
+    #      thing the guard controls) must not increase. If THIS rises, the guard
+    #      itself is broken; if only the FULL awMSE rises while this stays flat,
+    #      the regression is purely off-diagonal cross-term (uncontrolled by the
+    #      diagonal certificate) — expected, not a bug.
+    if args.mse_guard:
+        assert diag_after <= diag_before * (1 + 1e-6) + 1e-12, (
+            f"[{name}] DIAGONAL awMSE INCREASED {diag_before:.6e} -> "
+            f"{diag_after:.6e} under --mse-guard. Corollary-2 per-move guard "
+            f"(gap < 2|e|) VIOLATED -> the guard logic in ncc.py is wrong."
+        )
+
     def pct(a, b):
         return (b - a) / a * 100.0 if a not in (0.0, float("nan")) else float("nan")
 
@@ -568,7 +626,9 @@ def run_lnq_layer(
         f"MSE {m_before['mse']:.4e}->{m_after['mse']:.4e} ({pct(m_before['mse'],m_after['mse']):+.2f}%) | "
         f"awMSE[base] {awmse_before:.4e}->{awmse_after:.4e} ({pct(awmse_before,awmse_after):+.2f}%) | "
         f"awMSE[orig] {awmse_orig_before:.4e}->{awmse_orig_after:.4e} "
-        f"({pct(awmse_orig_before,awmse_orig_after):+.2f}%) | lnq={dt_lnq:.1f}s"
+        f"({pct(awmse_orig_before,awmse_orig_after):+.2f}%) | "
+        f"diag {diag_before:.4e}->{diag_after:.4e} ({pct(diag_before,diag_after):+.2f}%) | "
+        f"lnq={dt_lnq:.1f}s"
     )
 
     return {
@@ -579,6 +639,7 @@ def run_lnq_layer(
         "awmse_before": awmse_before, "awmse_after": awmse_after, "awmse_d%": pct(awmse_before, awmse_after),
         "awmse_orig_before": awmse_orig_before, "awmse_orig_after": awmse_orig_after,
         "awmse_orig_d%": pct(awmse_orig_before, awmse_orig_after),
+        "diag_before": diag_before, "diag_after": diag_after, "diag_d%": pct(diag_before, diag_after),
     }
 
 

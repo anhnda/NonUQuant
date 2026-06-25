@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
-from any_precision.analyzer.analyzer import ModelAnalyzer
+from GuidedQuant.any_precision.analyzer.analyzer import ModelAnalyzer
 from typing import List, Tuple, Literal, Optional
 import time
 

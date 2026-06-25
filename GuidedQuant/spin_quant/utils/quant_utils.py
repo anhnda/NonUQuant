@@ -13,9 +13,9 @@ import math
 import torch
 import transformers
 
-from train_utils.quant_linear import QuantizeLinear
-from utils import hadamard_utils
-from utils.utils import HadamardTransform
+from GuidedQuant.spin_quant.train_utils.quant_linear import QuantizeLinear
+from GuidedQuant.spin_quant.utils.utils import hadamard_utils
+from GuidedQuant.spin_quant.utils.utils import HadamardTransform
 
 
 def get_minq_maxq(bits, sym):

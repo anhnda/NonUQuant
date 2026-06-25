@@ -1,4 +1,4 @@
-from any_precision.modules.AnyPrecisionForCausalLM import AnyPrecisionForCausalLM
+from GuidedQuant.any_precision.modules.AnyPrecisionForCausalLM import AnyPrecisionForCausalLM
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 import torch
 import time

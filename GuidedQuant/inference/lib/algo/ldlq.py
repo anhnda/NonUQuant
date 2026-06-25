@@ -5,7 +5,7 @@ import logging
 import torch
 from tqdm import tqdm
 
-from lib import utils
+from GuidedQuant.inference.lib import utils
 
 _PERMUTE = torch.arange(256).reshape(2, 8, 2, 4, 2).permute(1, 3, 2, 0,
                                                             4).flatten()

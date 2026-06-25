@@ -15,14 +15,14 @@ import torch.distributed as dist
 from torch import nn
 from transformers import LlamaTokenizerFast, Trainer, default_data_collator
 import transformers
-from train_utils.fsdp_trainer import FSDPTrainer
-from train_utils.main import prepare_model
-from train_utils.modeling_llama_quant import LlamaForCausalLM as LlamaForCausalLMQuant
-from train_utils.optimizer import SGDG
-from utils.data_utils import CustomJsonDataset
-from utils.hadamard_utils import random_hadamard_matrix
-from utils.process_args import process_args_ptq
-from utils.utils import get_local_rank, get_logger, pt_fsdp_state_dict
+from GuidedQuant.spin_quant.train_utils.fsdp_trainer import FSDPTrainer
+from GuidedQuant.spin_quant.train_utils.main import prepare_model
+from GuidedQuant.spin_quant.train_utils.modeling_llama_quant import LlamaForCausalLM as LlamaForCausalLMQuant
+from GuidedQuant.spin_quant.train_utils.optimizer import SGDG
+from GuidedQuant.spin_quant.utils.data_utils import CustomJsonDataset
+from GuidedQuant.spin_quant.utils.hadamard_utils import random_hadamard_matrix
+from GuidedQuant.spin_quant.utils.process_args import process_args_ptq
+from GuidedQuant.spin_quant.utils.utils import get_local_rank, get_logger, pt_fsdp_state_dict
 
 log: Logger = get_logger("spinquant")
 

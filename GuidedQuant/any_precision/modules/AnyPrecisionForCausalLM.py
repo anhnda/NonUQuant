@@ -14,7 +14,7 @@ from accelerate.big_modeling import (
 from huggingface_hub import snapshot_download
 
 from .AnyPrecisionLinear import AnyPrecisionLinear
-from any_precision.analyzer.analyzer import get_analyzer
+from GuidedQuant.any_precision.analyzer.analyzer import get_analyzer
 
 
 def replace_module_by_name(layer, module_name, new_module):

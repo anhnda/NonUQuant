@@ -2,8 +2,8 @@ import os
 import json
 import argparse
 
-from any_precision.evaluate.helpers import utils
-from any_precision.evaluate import eval
+from GuidedQuant.any_precision.evaluate.helpers import utils
+from GuidedQuant.any_precision.evaluate import eval
 
 print("""This script will evaluate all models in the cache directory by:
     1. Calculating perplexity on specified datasets, and

@@ -3,11 +3,12 @@ import os
 import time
 from typing import Optional
 
+from GuidedQuant.qtip.lib.utils import clean
 import torch
 from transformers import AutoTokenizer
-from model.cache_utils import StaticCache
+from GuidedQuant.qtip.model.cache_utils import StaticCache
 
-from lib.utils.unsafe_import import model_from_hf_path
+from GuidedQuant.qtip.lib.utils.unsafe_import import model_from_hf_path
 
 torch.set_grad_enabled(False)
 
@@ -92,7 +93,7 @@ def get_emb(args, kwargs):
     return args[0]
 
 
-from lib.utils import shard_model as sm, clean
+from GuidedQuant.qtip.lib.utils import shard_model as sm
 
 def main(hf_path, compile, interactive, max_tokens, top_k):
     device = "cuda"

@@ -4,8 +4,8 @@ import time
 import torch
 import torch.nn as nn
 
-from lib.codebook import bitshift
-from lib.utils import (clean, dtype_from_str, get_hadK, has_kernel,
+from GuidedQuant.inference.lib.codebook import bitshift
+from GuidedQuant.inference.lib.utils import (clean, dtype_from_str, get_hadK, has_kernel,
                        matmul_hadU_cuda)
 
 

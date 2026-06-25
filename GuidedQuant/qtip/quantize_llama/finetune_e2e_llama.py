@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
 
+from GuidedQuant.qtip.lib import codebook
 import glog
 import torch
 import torch.multiprocessing as mp
@@ -20,10 +21,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.modeling_attn_mask_utils import \
     _prepare_4d_causal_attention_mask
 
-from lib import codebook, utils
-from lib.algo import finetune
-from lib.linear import QuantizedLinear
-from lib.utils.unsafe_import import model_from_hf_path
+from GuidedQuant.qtip.lib import utils
+from GuidedQuant.qtip.lib.algo import finetune
+from GuidedQuant.qtip.lib.linear import QuantizedLinear
+from GuidedQuant.qtip.lib.utils.unsafe_import import model_from_hf_path
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', default=0, type=int)

@@ -17,7 +17,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from transformers.modeling_attn_mask_utils import \
     _prepare_4d_causal_attention_mask
 
-from lib import utils
+from GuidedQuant.qtip.lib import utils
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', default=2, type=int)

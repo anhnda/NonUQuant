@@ -5,7 +5,7 @@ except ImportError:
 
 import torch
 
-from lib import utils
+from GuidedQuant.inference.lib import utils
 
 torch._dynamo.config.cache_size_limit = 256
 

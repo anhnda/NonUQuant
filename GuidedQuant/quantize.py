@@ -1,5 +1,5 @@
 import argparse
-from any_precision.quantization import any_precision_quantize
+from GuidedQuant.any_precision.quantization import any_precision_quantize
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Quantize a model to any precision")

@@ -1,5 +1,5 @@
 import argparse
-from any_precision.quantization import full_nuq
+from GuidedQuant.any_precision.quantization import full_nuq
 
 def str2bool(v):
     if isinstance(v, bool):
