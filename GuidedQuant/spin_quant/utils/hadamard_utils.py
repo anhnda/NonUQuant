@@ -10,7 +10,7 @@
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
 import torch
-from GuidedQuant.spin_quant.utils.utils import HadamardTransform
+from utils.utils import HadamardTransform
 
 
 def get_hadK(n, transpose=False):

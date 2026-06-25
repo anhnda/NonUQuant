@@ -8,14 +8,12 @@
 # This code is based on QuaRot(https://github.com/spcl/QuaRot/tree/main/quarot).
 # Licensed under Apache License 2.0.
 
-from GuidedQuant.spin_quant.eval_utils import gptq_guided_utils, gptq_utils
-from GuidedQuant.spin_quant.utils import data_utils, fuse_norm_utils, hadamard_utils, quant_utils
 import torch
 import transformers
 
-from GuidedQuant.spin_quant.eval_utils import rotation_utils
-from GuidedQuant.spin_quant.utils import utils
-from GuidedQuant.spin_quant.utils.convert_to_executorch import (
+from eval_utils import gptq_utils, gptq_guided_utils, rotation_utils
+from utils import data_utils, fuse_norm_utils, hadamard_utils, quant_utils, utils
+from utils.convert_to_executorch import (
     sanitize_checkpoint_from_spinquant,
     write_model_llama,
 )

@@ -4,7 +4,7 @@ from tqdm.auto import trange
 import os
 import logging
 from .config import *
-from GuidedQuant.any_precision.analyzer.analyzer import ModelAnalyzer
+from any_precision.analyzer.analyzer import ModelAnalyzer
 from typing import List, Tuple, Sequence, Dict
 from itertools import chain
 from tqdm import tqdm

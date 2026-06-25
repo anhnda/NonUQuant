@@ -1,5 +1,5 @@
 import argparse
-from GuidedQuant.any_precision.quantization import layerwise_nuq
+from any_precision.quantization import layerwise_nuq
 
 def str2bool(v):
     if isinstance(v, bool):

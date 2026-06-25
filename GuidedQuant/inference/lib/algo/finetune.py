@@ -7,14 +7,13 @@ from contextlib import contextmanager
 from operator import attrgetter
 
 import logging
-from GuidedQuant.inference.lib import codebook
 import torch
 from torch import multiprocessing as mp
 from torch import nn
 from transformers import AutoModelForCausalLM
 
-from GuidedQuant.inference.lib import utils
-from GuidedQuant.inference.lib.linear import QuantizedLinear
+from lib import codebook, utils
+from lib.linear import QuantizedLinear
 
 from . import ldlq
 

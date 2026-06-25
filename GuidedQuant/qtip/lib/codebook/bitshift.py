@@ -8,10 +8,10 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
-from GuidedQuant.qtip.lib.codebook import kdict
-from GuidedQuant.qtip.lib.utils.kernel_check import has_kernel
-from GuidedQuant.qtip.lib.utils.kernel_decompress import decode_compressed, bitshift_linear_kernel
-from GuidedQuant.qtip.lib.utils.matmul_had import matmul_hadU_cuda, matmul_hadUt_cuda
+from lib.codebook import kdict
+from lib.utils.kernel_check import has_kernel
+from lib.utils.kernel_decompress import decode_compressed, bitshift_linear_kernel
+from lib.utils.matmul_had import matmul_hadU_cuda, matmul_hadUt_cuda
 
 
 def decode_1mad(x):

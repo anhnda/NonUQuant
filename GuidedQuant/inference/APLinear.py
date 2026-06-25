@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from GuidedQuant.inference.plugin import *
+from plugin import *
 
 class APLinear(nn.Module):
     def __init__(self, in_features, out_features, bitwidth, bias=False, dtype=torch.half):

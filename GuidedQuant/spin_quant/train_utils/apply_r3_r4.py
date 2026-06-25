@@ -10,16 +10,15 @@
 
 import math
 
-from GuidedQuant.spin_quant.utils import quant_utils
 import torch
 import tqdm
 
-from GuidedQuant.spin_quant.utils import utils
-from GuidedQuant.spin_quant.utils.hadamard_utils import (
+from utils import quant_utils, utils
+from utils.hadamard_utils import (
     apply_exact_had_to_linear,
     is_pow2,
 )
-from GuidedQuant.spin_quant.utils.utils import HadamardTransform
+from utils.utils import HadamardTransform
 
 
 def R4_rotate_down_proj_weights(layer):
@@ -116,7 +115,7 @@ def add_qk_rotation_wrapper_after_function_call_in_forward(
     """
     import functools
 
-    from GuidedQuant.spin_quant.utils import monkeypatch
+    from utils import monkeypatch
 
     attr_name = f"{function_name}_qk_rotation_wrapper"
     assert not hasattr(module, attr_name)

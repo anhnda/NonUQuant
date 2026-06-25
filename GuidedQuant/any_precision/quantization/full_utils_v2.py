@@ -17,9 +17,9 @@ from typing import Sequence
 
 NO_DATA = torch.empty(0)
 
-from GuidedQuant.any_precision.quantization.full_utils_v1 import ConfigurableAdamW
-from GuidedQuant.any_precision.quantization.finetune_utils import QuantizedWeightFSDP, QuantizedLinearFSDP
-from GuidedQuant.any_precision.quantization.utils import get_progress_bar
+from any_precision.quantization.full_utils_v1 import ConfigurableAdamW
+from any_precision.quantization.finetune_utils import QuantizedWeightFSDP, QuantizedLinearFSDP
+from any_precision.quantization.utils import get_progress_bar
 
 class ParameterRole(Enum):
     QUANTIZED_PARAMETER = auto()  # entire quantized weight, in a de-quantized form

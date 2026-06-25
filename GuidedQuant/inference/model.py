@@ -14,7 +14,7 @@ from torch.nn import functional as F
 import transformers
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-from GuidedQuant.inference.plugin import *
+from plugin import *
 
 def find_multiple(n: int, k: int) -> int:
     if n % k == 0:

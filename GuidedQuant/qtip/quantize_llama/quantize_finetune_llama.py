@@ -12,9 +12,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.modeling_attn_mask_utils import \
     _prepare_4d_causal_attention_mask
 
-from GuidedQuant.qtip.lib import utils
-from GuidedQuant.qtip.lib.algo import finetune
-from GuidedQuant.qtip.lib.codebook import bitshift
+from lib import utils
+from lib.algo import finetune
+from lib.codebook import bitshift
 from operator import attrgetter
 
 parser = argparse.ArgumentParser()

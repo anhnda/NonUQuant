@@ -8,12 +8,11 @@
 # This code is based on QuaRot(https://github.com/spcl/QuaRot/tree/main/quarot).
 # Licensed under Apache License 2.0.
 
-from GuidedQuant.spin_quant.utils import quant_utils
 import torch
 import tqdm
 
-from GuidedQuant.spin_quant.train_utils.quant_linear import QuantizeLinear
-from GuidedQuant.spin_quant.utils import utils
+from train_utils.quant_linear import QuantizeLinear
+from utils import quant_utils, utils
 
 
 @torch.no_grad()

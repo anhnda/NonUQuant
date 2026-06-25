@@ -1,7 +1,7 @@
 import fast_hadamard_transform
 import torch
 
-from GuidedQuant.qtip.lib import utils
+from lib import utils
 
 torch._dynamo.config.cache_size_limit = 256
 

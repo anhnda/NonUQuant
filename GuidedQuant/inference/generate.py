@@ -16,8 +16,8 @@ import torch._dynamo.config
 import torch._inductor.config
 
 from transformers import AutoTokenizer
-from GuidedQuant.inference.APLinear import APLinear
-from GuidedQuant.inference.LUTGEMMLinear import LUTGEMMLinear
+from APLinear import APLinear
+from LUTGEMMLinear import LUTGEMMLinear
 
 sys.path.append(os.path.abspath("../qtip/lib/linear"))
 from quantized_linear import QuantizedLinear as QTIPLinear
@@ -50,7 +50,7 @@ default_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-from GuidedQuant.inference.model import Transformer
+from model import Transformer
 
 def multinomial_sample_one_no_sync(probs_sort): # Does multinomial sampling without a cuda synchronization
     q = torch.empty_like(probs_sort).exponential_(1)

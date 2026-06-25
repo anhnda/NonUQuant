@@ -4,7 +4,7 @@ from tqdm import tqdm
 import logging
 from typing import Optional, Tuple
 from .config import *
-from GuidedQuant.any_precision.analyzer import dispatch_model
+from any_precision.analyzer import dispatch_model
 
 
 def get_gradients(

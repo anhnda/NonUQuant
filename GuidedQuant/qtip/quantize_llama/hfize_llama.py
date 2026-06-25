@@ -2,14 +2,13 @@ import argparse
 import os
 import time
 
-from GuidedQuant.qtip.lib import codebook
 import glog
 import torch
 from transformers import AutoTokenizer
 
-from GuidedQuant.qtip.lib import utils
-from GuidedQuant.qtip.lib.utils.unsafe_import import model_from_hf_path
-from GuidedQuant.qtip.model.llama import LlamaForCausalLM
+from lib import codebook, utils
+from lib.utils.unsafe_import import model_from_hf_path
+from model.llama import LlamaForCausalLM
 from transformers import LlamaForCausalLM as OrigLlama
 
 torch.set_grad_enabled(False)

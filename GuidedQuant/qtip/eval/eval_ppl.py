@@ -9,9 +9,9 @@ import glog
 import torch
 from tqdm import tqdm
 
-from GuidedQuant.qtip.lib.linear import QuantizedLinear
-from GuidedQuant.qtip.lib.utils import gptq_data_utils
-from GuidedQuant.qtip.lib.utils.unsafe_import import model_from_hf_path
+from lib.linear import QuantizedLinear
+from lib.utils import gptq_data_utils
+from lib.utils.unsafe_import import model_from_hf_path
 
 torch.set_grad_enabled(False)
 

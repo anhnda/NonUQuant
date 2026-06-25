@@ -5,7 +5,7 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader, Dataset
 
-from GuidedQuant.inference.lib import codebook
+from lib import codebook
 
 from .matmul_had import matmul_hadU
 from .misc import clean

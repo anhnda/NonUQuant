@@ -8,12 +8,10 @@
 # This code is based on QuaRot(https://github.com/spcl/QuaRot/tree/main/quarot).
 # Licensed under Apache License 2.0.
 
-from GuidedQuant.spin_quant.train_utils import apply_r3_r4
-from GuidedQuant.spin_quant.utils import fuse_norm_utils, hadamard_utils, quant_utils
 import transformers
 
-from GuidedQuant.spin_quant.train_utils import rtn_utils
-from GuidedQuant.spin_quant.utils import utils
+from train_utils import apply_r3_r4, rtn_utils
+from utils import fuse_norm_utils, hadamard_utils, quant_utils, utils
 
 
 def prepare_model(args, model):

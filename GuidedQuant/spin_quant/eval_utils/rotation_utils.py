@@ -11,17 +11,16 @@
 import functools
 import math
 
-from GuidedQuant.spin_quant.utils import monkeypatch, quant_utils
 import torch
 import tqdm
 
-from GuidedQuant.spin_quant.utils import utils
-from GuidedQuant.spin_quant.utils.hadamard_utils import (
+from utils import monkeypatch, quant_utils, utils
+from utils.hadamard_utils import (
     apply_exact_had_to_linear,
     is_pow2,
     random_hadamard_matrix,
 )
-from GuidedQuant.spin_quant.utils.utils import HadamardTransform
+from utils.utils import HadamardTransform
 
 
 def random_orthogonal_matrix(size, device):

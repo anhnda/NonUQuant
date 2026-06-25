@@ -9,15 +9,14 @@ import datetime
 from logging import Logger
 
 import os
-from GuidedQuant.spin_quant.utils import data_utils, eval_utils
 import torch
 import torch.distributed as dist
 from transformers import LlamaTokenizerFast
 import transformers
-from GuidedQuant.spin_quant.eval_utils.main import ptq_model
-from GuidedQuant.spin_quant.eval_utils.modeling_llama import LlamaForCausalLM
-from GuidedQuant.spin_quant.utils import utils
-from GuidedQuant.spin_quant.utils.process_args import process_args_ptq
+from eval_utils.main import ptq_model
+from eval_utils.modeling_llama import LlamaForCausalLM
+from utils import data_utils, eval_utils, utils
+from utils.process_args import process_args_ptq
 
 log: Logger = utils.get_logger("spinquant")
 

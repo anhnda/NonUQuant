@@ -30,13 +30,13 @@ from torch.distributed.fsdp import (
     StateDictType,
 )
 from tqdm.auto import tqdm
-from GuidedQuant.any_precision.quantization.finetune_utils import (
+from any_precision.quantization.finetune_utils import (
     QuantizedWeightFSDP, 
     QuantizedLinearFSDP, 
     IntCodes,
 )
-from GuidedQuant.any_precision.quantization.full_datautils import get_loaders
-from GuidedQuant.any_precision.quantization.full_utils_v1 import (
+from any_precision.quantization.full_datautils import get_loaders
+from any_precision.quantization.full_utils_v1 import (
     ConfigurableAdamW, 
     auto_model_load,
     group_texts, 
@@ -45,14 +45,14 @@ from GuidedQuant.any_precision.quantization.full_utils_v1 import (
     is_model_for_causal_lm,
     compute_kl_divergence_loss_values,
 )
-from GuidedQuant.any_precision.quantization.full_utils_v2 import (
+from any_precision.quantization.full_utils_v2 import (
     create_dequantized_model, 
     StraightThroughAdamW,
     split_quantized_weights_between_ranks,
     YourQuantizedWeightIsInAnotherRank,
     get_original_named_parameters_from_fsdp_module,
 )
-from GuidedQuant.any_precision.quantization.pack import pack_single_weight, unpack_single_weight
+from any_precision.quantization.pack import pack_single_weight, unpack_single_weight
 from any_precision.modules import AnyPrecisionForCausalLM
 from multiprocessing import Pool
 

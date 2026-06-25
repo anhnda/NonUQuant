@@ -7,17 +7,16 @@ import math
 from contextlib import contextmanager
 from operator import attrgetter
 
-from GuidedQuant.qtip.lib import codebook
 import glog
 import torch
 from torch import multiprocessing as mp
 from torch import nn
 from transformers import AutoModelForCausalLM
 
-from GuidedQuant.qtip.lib import utils
-from GuidedQuant.qtip.lib.linear import QuantizedLinear
+from lib import codebook, utils
+from lib.linear import QuantizedLinear
 
-from GuidedQuant.qtip.lib.algo import ldlq
+from lib.algo import ldlq
 import time
 
 @contextmanager
@@ -149,7 +148,7 @@ def preprocess_group(HR, W, cb, SU, SV, scale_override, sigma_reg, device):
     return HRr, Wr, Wscale
 
 def test_new_preprocess():
-    from GuidedQuant.qtip.lib.codebook import bitshift
+    from lib.codebook import bitshift
 
     g, m, n = 1, 512, 512
     L, K, V = 16, 2, 2
