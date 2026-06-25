@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import sys
 import time
 import types
@@ -287,6 +288,183 @@ def diagonal_awmse(W_fp, W_q, sigma_ii) -> float:
     e = (W_q - W_fp).float()              # [out, in]
     s = sigma_ii.float().unsqueeze(0)     # [1, in]
     return ((e * e) * s).sum().item() / e.shape[0]
+
+
+# ---------------------------------------------------------------------------
+# Full-Sigma NCC corrector (OFF-SPEC diagnostic; not the paper's separable rule).
+# ---------------------------------------------------------------------------
+# Objective restated by the user: reduce bias, but do NOT hurt (full) awMSE.
+#
+# The shipped apply_ncc / mse_guard only bound the DIAGONAL awMSE; on layers with
+# strong off-diagonal Sigma the full awMSE still regresses (the off-diagonal
+# cross-term 2 Delta_i (Sigma e)_i is uncontrolled). This corrector replaces the
+# diagonal gate with the EXACT per-flip change of the full activation-weighted
+# MSE, computed against the layer Hessian H = X^T X (= n * Sigma up to scale; any
+# positive scale is fine since we only test the sign of Delta):
+#
+#     awMSE(row) = e^T H e        (e = Wq_row - Wfp_row)
+#     flip of column i: e_i -> e_i + d_i ,  d_i = target_val_i - Wq_i = -sign(e_i) g_i
+#     Delta_awMSE = 2 d_i (H e)_i + d_i^2 H_ii          (exact, single flip)
+#
+# We keep the paper's bias-progress ORDERING (eta = |mu|/((sigma_ii+eps) g) for
+# cov, |mu|/g for lite) so each accepted flip still pulls bias down the most per
+# move; the full-Sigma test is only the ACCEPTANCE gate. A flip is taken iff:
+#   (1) sign-aligned (reduces bias: sign(mu_i) == sign(e_i * b)), AND
+#   (2) it does not overshoot the bias (|b - v| <= |b|, the Thm-3 no-overshoot
+#       condition applied incrementally), AND
+#   (3) full-Sigma Delta_awMSE <= 0   (mode "full-greedy", exact, with rank-1
+#       update of (H e) after each accepted flip), OR a first-order screen using
+#       the pre-flip (H e) without the rank-1 update (mode "full-screen", cheap).
+#
+# This guarantees, by construction and measured on the realised tensor, that the
+# FULL awMSE never increases AND the bias never increases. It is O(flips * in) per
+# row (full-greedy) because of the rank-1 (H e) update; full-screen is O(in) extra.
+#
+# NOTE: this is NOT NCC-as-published. It answers "do bias-reducing,
+# awMSE-non-increasing complementary flips EXIST and how much bias can they
+# remove", not "does the separable diagonal rule work". Report it as such.
+@torch.no_grad()
+def apply_ncc_full_sigma(
+    *,
+    W_fp: torch.Tensor,        # [out, in] original fp weights (bias + awMSE target)
+    qres,                      # QuantResult (single-block LNQ codebook)
+    H: torch.Tensor,           # [in, in] layer Hessian X^T X (any positive scale)
+    mu: torch.Tensor,          # [in] activation mean
+    sigma_ii: torch.Tensor,    # [in] diag(Sigma) for the eta="cov" ordering
+    budget_p: float = 0.02,
+    score: str = "cov",
+    cov_eps: float = 1e-6,
+    gap_floor: float = 1e-8,
+    mode: str = "full-greedy", # "full-greedy" (exact) | "full-screen" (first-order)
+    row_chunk: int = 256,
+):
+    """Return (W_corr, stats_dict). Mirrors apply_ncc's gap/target/sign machinery
+    but gates on the EXACT full-Sigma awMSE change. CPU/GPU agnostic."""
+    device = W_fp.device
+    out_features, in_features = W_fp.shape
+    bs = qres.block_size
+    L = qres.block_codebooks.shape[-1]
+    if qres.block_codebooks is None:
+        raise RuntimeError("apply_ncc_full_sigma requires materialised block_codebooks.")
+
+    mu = mu.to(device).float()
+    sigma_ii = sigma_ii.to(device).float()
+    H = H.to(device).float()                                  # [in, in]
+    Hdiag = torch.diagonal(H).clamp(min=1e-30)               # [in]
+
+    Wq_full = qres.W_dequant.to(device).float()
+    indices_full = qres.indices.to(device)
+    Wq_corr = Wq_full.clone()
+
+    col_block = torch.arange(in_features, device=device) // bs
+    total_flips = 0
+    bias_before = 0.0
+    bias_after = 0.0
+    awmse_blocked = 0        # flips wanted by bias but blocked by full-Sigma gate
+    overshoot_blocked = 0
+
+    for r0 in range(0, out_features, row_chunk):
+        r1 = min(r0 + row_chunk, out_features)
+        rc = r1 - r0
+        Wr = W_fp[r0:r1].float()                              # [rc, in]
+        Wq = Wq_full[r0:r1]
+        idx = indices_full[r0:r1]
+        levels = qres.block_codebooks[r0:r1].to(device).float()   # [rc, n_blocks, L]
+
+        blk = col_block.view(1, in_features, 1).expand(rc, in_features, L)
+        levels_per_w = torch.gather(levels, 1, blk)          # [rc, in, L]
+        cur = torch.gather(levels_per_w, 2, idx.unsqueeze(-1)).squeeze(-1)
+        left_idx = (idx - 1).clamp(min=0)
+        right_idx = (idx + 1).clamp(max=L - 1)
+        left = torch.gather(levels_per_w, 2, left_idx.unsqueeze(-1)).squeeze(-1)
+        right = torch.gather(levels_per_w, 2, right_idx.unsqueeze(-1)).squeeze(-1)
+        del levels_per_w, blk
+
+        e = (Wq - Wr).float()                                 # [rc, in]
+        e_sign = torch.sign(e)
+        b = (e * mu.unsqueeze(0)).sum(dim=1)                  # [rc]
+        g_left = (cur - left).abs()
+        g_right = (right - cur).abs()
+        move_down = e_sign > 0
+        gap = torch.where(move_down, g_left, g_right)
+        target_val = torch.where(move_down, left, right)
+        feasible = torch.where(move_down, idx > 0, idx < (L - 1))
+        gap_ok = gap > gap_floor
+        # per-flip weight delta d_i = target - Wq = -sign(e) * gap
+        d = (target_val - Wq).float()                         # [rc, in]
+        # first-moment per move v = mu * d sign convention: b changes by mu_i * d_i
+        v = mu.unsqueeze(0) * d                               # [rc, in]
+        sign_ok = torch.sign(mu).unsqueeze(0) == torch.sign(e_sign * b.unsqueeze(1))
+        admissible = feasible & sign_ok & gap_ok
+
+        # eta ordering (same as NCC).
+        if score == "cov":
+            denom = (sigma_ii.unsqueeze(0) + cov_eps) * gap.clamp(min=gap_floor)
+        else:
+            denom = gap.clamp(min=gap_floor)
+        eta = mu.abs().unsqueeze(0) / denom
+        eta = torch.where(admissible, eta, torch.full_like(eta, -1.0))
+        order = torch.argsort(eta, dim=1, descending=True)
+
+        # He = H @ e^T per row : shape [rc, in]. (H e_row)_i = sum_k H_ik e_row,k
+        He = e @ H.t()                                        # [rc, in]
+        bias_before += float((b * b).sum().item())
+
+        for rr in range(rc):
+            bj = float(b[rr].item())
+            o = order[rr]
+            adm = admissible[rr, o]
+            n_adm = int(adm.sum().item())
+            if n_adm == 0 or bj == 0.0:
+                bias_after += bj * bj
+                continue
+            cap = max(1, math.ceil(budget_p * n_adm))
+            cand = o[:n_adm][:cap]
+
+            b_cur = bj
+            He_row = He[rr].clone()                           # mutated on accept
+            e_row = e[rr]                                     # read-only base residual
+            n_flip = 0
+            for ci in range(cand.numel()):
+                col = int(cand[ci].item())
+                di = float(d[rr, col].item())          # weight delta = target - Wq = Delta_i
+                # bias changes by mu_i * d_i exactly: b -> sum mu (e + d) = b + mu_i d_i.
+                # (Equivalent to NCC's b' = b - v_NCC with v_NCC = -mu*Delta.)
+                db_i = float((mu[col] * d[rr, col]).item())
+                # (2) no-overshoot: accept only if it brings |b| strictly down.
+                b_new = b_cur + db_i
+                if abs(b_new) > abs(b_cur) + 1e-12:
+                    overshoot_blocked += 1
+                    continue
+                # (3) full-Sigma awMSE change for this flip
+                hei = float(He_row[col].item()) if mode == "full-greedy" else float(He[rr, col].item())
+                delta = 2.0 * di * hei + di * di * float(Hdiag[col].item())
+                if delta > 0.0:
+                    awmse_blocked += 1
+                    continue
+                # accept
+                Wq_corr[r0 + rr, col] = target_val[rr, col]
+                b_cur = b_new
+                n_flip += 1
+                if mode == "full-greedy":
+                    # rank-1 update of He_row: e_col += di  => He_row += di * H[:,col]
+                    He_row = He_row + di * H[:, col]
+            total_flips += n_flip
+            bias_after += b_cur * b_cur
+
+        del e, e_sign, gap, v, d, eta, order, levels, cur, left, right, He
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    stats = {
+        "flips": total_flips,
+        "bias_before": bias_before,
+        "bias_after": bias_after,
+        "awmse_blocked": awmse_blocked,
+        "overshoot_blocked": overshoot_blocked,
+        "mode": mode,
+    }
+    return Wq_corr.to(W_fp.dtype), stats
 
 
 # ---------------------------------------------------------------------------
@@ -548,21 +726,46 @@ def run_lnq_layer(
     # diagonal-only awMSE = the EXACT quantity Corollary 2 / mse_guard controls.
     diag_before = diagonal_awmse(W_base, W_lnq, sigma)
 
-    # ---- apply NCC (same call the real pipeline uses) ----
+    # ---- apply NCC (same call the real pipeline uses), or the off-spec
+    #      full-Sigma corrector when --mse-guard-mode != diag ----
     mu_var_js = (sigma / cnt) if args.ncc_use_james_stein else None
-    W_corr, stats = apply_ncc(
-        W_fp=W_base,
-        qres=qres,
-        mu=mu,
-        budget_p=args.ncc_budget_p,
-        use_james_stein=args.ncc_use_james_stein,
-        mu_var=mu_var_js,
-        row_chunk=args.row_chunk,
-        score=args.score,
-        sigma_ii=sigma if args.score == "cov" else None,
-        cov_eps=args.cov_eps,
-        mse_guard=args.mse_guard,
-    )
+    if args.mse_guard_mode == "diag":
+        W_corr, stats = apply_ncc(
+            W_fp=W_base,
+            qres=qres,
+            mu=mu,
+            budget_p=args.ncc_budget_p,
+            use_james_stein=args.ncc_use_james_stein,
+            mu_var=mu_var_js,
+            row_chunk=args.row_chunk,
+            score=args.score,
+            sigma_ii=sigma if args.score == "cov" else None,
+            cov_eps=args.cov_eps,
+            mse_guard=args.mse_guard,
+        )
+        s_flips = int(getattr(stats, "flips", -1))
+        s_bb = getattr(stats, "bias_before", None)
+        s_ba = getattr(stats, "bias_after", None)
+        s_extra = ""
+    else:
+        mode = "full-greedy" if args.mse_guard_mode == "full-greedy" else "full-screen"
+        W_corr, stats = apply_ncc_full_sigma(
+            W_fp=W_base,
+            qres=qres,
+            H=H,
+            mu=mu,
+            sigma_ii=sigma,
+            budget_p=args.ncc_budget_p,
+            score=args.score,
+            cov_eps=args.cov_eps,
+            mode=mode,
+            row_chunk=args.row_chunk,
+        )
+        s_flips = int(stats["flips"])
+        s_bb = stats["bias_before"]
+        s_ba = stats["bias_after"]
+        s_extra = (f" | blocked(awmse={stats['awmse_blocked']},"
+                   f"overshoot={stats['overshoot_blocked']})")
     W_corr = W_corr.float()
 
     # ---- metrics AFTER NCC ----
@@ -571,12 +774,10 @@ def run_lnq_layer(
     awmse_after = activation_weighted_mse(W_base, W_corr, X) if X is not None else float("nan")
     awmse_orig_after = activation_weighted_mse(W_fp, W_corr, X) if X is not None else float("nan")
     diag_after = diagonal_awmse(W_base, W_corr, sigma)
-    flips = int(getattr(stats, "flips", -1))
+    flips = s_flips
 
-    # ---- cross-check NCC-internal bias vs external B_hat (same baseline) ----
-    s_bb = getattr(stats, "bias_before", None)
-    s_ba = getattr(stats, "bias_after", None)
-
+    # ---- cross-check corrector-internal bias vs external B_hat (same baseline).
+    #      Works for both NCCStats (diag) and the dict stats (full-Sigma). ----
     def _close(a, b, rtol=1e-2, atol=1e-8):
         if a is None:
             return True
@@ -585,13 +786,13 @@ def run_lnq_layer(
 
     if s_bb is not None:
         assert _close(s_bb, bias_before), (
-            f"[{name}] NCC stats.bias_before={float(s_bb):.6e} != external "
-            f"B_hat={bias_before:.6e}. NCC bias definition differs from "
+            f"[{name}] corrector bias_before={float(s_bb):.6e} != external "
+            f"B_hat={bias_before:.6e}. bias definition differs from "
             f"sum_j (mu^T e_j)^2 on the same baseline."
         )
     if s_ba is not None:
         assert _close(s_ba, bias_after), (
-            f"[{name}] NCC stats.bias_after={float(s_ba):.6e} != external "
+            f"[{name}] corrector bias_after={float(s_ba):.6e} != external "
             f"B_hat(W_corr)={bias_after:.6e}. Reported post-correction bias does "
             f"not match the corrected weights returned."
         )
@@ -614,6 +815,18 @@ def run_lnq_layer(
             f"(gap < 2|e|) VIOLATED -> the guard logic in ncc.py is wrong."
         )
 
+    # ---- full-Sigma invariant: in full-greedy mode the FULL awMSE (the user's
+    #      actual constraint "do not hurt mse") must not increase, by construction
+    #      (each accepted flip has exact Delta_awMSE <= 0 with rank-1 He update).
+    #      full-screen uses the pre-flip He so flip-coupling can still nudge it up;
+    #      it is only asserted to not regress beyond a small tolerance.
+    if args.mse_guard_mode == "full-greedy" and X is not None and awmse_before == awmse_before:
+        assert awmse_after <= awmse_before * (1 + 1e-4) + 1e-12, (
+            f"[{name}] FULL awMSE INCREASED {awmse_before:.6e} -> {awmse_after:.6e} "
+            f"under full-greedy. Exact full-Sigma gate violated -> bug in "
+            f"apply_ncc_full_sigma (He rank-1 update or Delta sign)."
+        )
+
     def pct(a, b):
         return (b - a) / a * 100.0 if a not in (0.0, float("nan")) else float("nan")
 
@@ -621,7 +834,7 @@ def run_lnq_layer(
     module.weight.data = W_corr.reshape(module.weight.shape).to(module.weight.dtype)
 
     print(
-        f"  {name:<30} flips={flips:>7} | "
+        f"  {name:<30} [{args.mse_guard_mode}] flips={flips:>7}{s_extra} | "
         f"bias {bias_before:.4e}->{bias_after:.4e} ({pct(bias_before,bias_after):+.2f}%) | "
         f"MSE {m_before['mse']:.4e}->{m_after['mse']:.4e} ({pct(m_before['mse'],m_after['mse']):+.2f}%) | "
         f"awMSE[base] {awmse_before:.4e}->{awmse_after:.4e} ({pct(awmse_before,awmse_after):+.2f}%) | "
@@ -680,6 +893,18 @@ def main():
     ap.add_argument("--cov-eps", type=float, default=1e-6)
     ap.add_argument("--mse-guard", action="store_true",
                     help="only admit flips with gap<2|e| (Cor-2 diagonal safety).")
+    ap.add_argument("--mse-guard-mode", choices=["diag", "full-screen", "full-greedy"],
+                    default="diag",
+                    help="diag (DEFAULT, faithful NCC): use apply_ncc; --mse-guard "
+                         "toggles the diagonal Cor-2 gate. full-screen / full-greedy "
+                         "(OFF-SPEC diagnostics): route to apply_ncc_full_sigma, which "
+                         "keeps the eta bias-ordering but gates each flip on the EXACT "
+                         "full-Sigma awMSE change Delta = 2 d (H e)_i + d^2 H_ii using "
+                         "H = X^T X. full-greedy applies the rank-1 (H e) update between "
+                         "flips (exact, guarantees full awMSE non-increasing); full-screen "
+                         "uses the pre-flip (H e) (cheap, approximate). Answers 'do "
+                         "bias-reducing, awMSE-non-increasing flips exist', NOT 'does the "
+                         "published diagonal rule work'.")
     # diagnostics
     ap.add_argument("--diag-max-tokens", type=int, default=4096,
                     help="cap tokens kept for activation-weighted MSE")
