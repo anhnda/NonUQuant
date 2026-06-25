@@ -1,26 +1,26 @@
 Qwen 2.5
 MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B/snapshots/d149729398750b98c0af14eb82c78cfe92750796 \
-DEVICE=cuda:0 N_CALIB=128 WBITS=3 GROUPSIZE=128 \
+DEVICE=cuda:0 N_CALIB=128 WBITS=4 GROUPSIZE=128 \
 NCC_SCORE=cov COV_EPS=1e-2 MSE_GUARD=1 BUDGET_P=0.005 \
 RUN_BASE=1 RUN_NCC_POST_MODULE=1 RUN_NCC_POST_BLOCK=0 \
-OUT_ROOT=./runs_gptvq3_qwen_guard_005 \
+OUT_ROOT=./runs_gptvq4_qwen_guard_005 \
 bash run_gptvq_ncc.sh
 
 Llama
 MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b \
-DEVICE=cuda:0 N_CALIB=128 WBITS=3 GROUPSIZE=128 \
+DEVICE=cuda:0 N_CALIB=128 WBITS=4 GROUPSIZE=128 \
 NCC_SCORE=cov COV_EPS=1e-2 MSE_GUARD=1 BUDGET_P=0.005 \
 RUN_BASE=1 RUN_NCC_POST_MODULE=1 RUN_NCC_POST_BLOCK=0 \
-OUT_ROOT=./runs_gptvq3_llama3_guard_005 \
+OUT_ROOT=./runs_gptvq4_llama3_guard_005 \
 bash run_gptvq_ncc.sh
 
 
 Mistral
 MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--mistralai--Mistral-7B-v0.3/snapshots/caa1feb0e54d415e2df31207e5f4e273e33509b1 \
-DEVICE=cuda:0 N_CALIB=128 WBITS=3 GROUPSIZE=128 \
+DEVICE=cuda:0 N_CALIB=128 WBITS=4 GROUPSIZE=128 \
 NCC_SCORE=cov COV_EPS=1e-2 MSE_GUARD=1 BUDGET_P=0.005 \
 RUN_BASE=1 RUN_NCC_POST_MODULE=1 RUN_NCC_POST_BLOCK=0 \
-OUT_ROOT=./runs_gptvq3_mistral_guard_005 \
+OUT_ROOT=./runs_gptvq4_mistral_guard_005 \
 bash run_gptvq_ncc.sh
 
 MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--mistralai--Mistral-7B-v0.3/snapshots/caa1feb0e54d415e2df31207e5f4e273e33509b1 QUANTIZER=nf3 DEVICE=cuda:0 N_CALIB=128 COV_EPS=1e-2 MSE_GUARD=1 RUN_BASE=0 RUN_NCC_COV_ADJ=0 RUN_NCC_LITE_ORIG=0 OUT_ROOT=./runs_nf3_mistral_guard bash run_gptq_ncc.sh
