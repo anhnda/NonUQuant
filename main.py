@@ -524,7 +524,7 @@ def build_parser():
     p = argparse.ArgumentParser(description="RBVTQuant main entrypoint: quantize + perplexity eval")
     p.add_argument("--model-path", type=str, required=True, help="HF model name or local path")
     p.add_argument("--device", type=str, default="cuda:0", help="Device for model loading/eval, e.g. cuda:0, cuda:1, cpu, or auto")
-    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt", "gptq", "gptvq"], help="Run mode")
+    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt", "gptq", "gptvq", "lnq"], help="Run mode")
     p.add_argument("--quantizer", type=str, default="nf4", choices=["nf3", "nf4", "nvfp4", "codebook3", "codebook4"])
     p.add_argument("--output-dir", type=str, default="./quantized_model")
 
@@ -603,6 +603,47 @@ def build_parser():
                    help="(method=gptvq) number of early Linear layers for activation-error diagnostics.")
     p.add_argument("--gptvq-diagnostic-max-tokens", dest="diagnostic_max_tokens", type=int, default=4096,
                    help="(method=gptvq) max calibration tokens retained per diagnostic layer.")
+
+    # --- LNQ backbone (method=lnq): GuidedQuant layer-wise non-uniform quant + NCC ---
+    # Reuses --wbits (codebook bit-width, K = 2**wbits levels per output channel),
+    # --kmeans-iters (Lloyd iters for the SqueezeLLM-style LNQ init), --row-chunk,
+    # and the shared NCC knobs --ncc-budget-p / --ncc-cov-eps / --ncc-mse-guard /
+    # --ncc-james-stein. The flags below are LNQ-specific.
+    p.add_argument("--max-layers", type=int, default=0,
+                   help="(method=lnq) only quantize the first N decoder blocks (0 = all).")
+    p.add_argument("--lnq-iters", type=int, default=3,
+                   help="(method=lnq) LNQ alternating-minimisation iterations T.")
+    p.add_argument("--cd-cycles", type=int, default=4,
+                   help="(method=lnq) cyclic coordinate-descent cycles K per assignment update.")
+    p.add_argument("--guided", dest="guided", action="store_true", default=False,
+                   help="(method=lnq) use the GuidedQuant saliency Hessian H = X^T diag(s) X "
+                        "(Eq. 7, g=1) instead of the plain layer-wise H = X^T X (Eq. 1).")
+    p.add_argument("--no-guided", dest="guided", action="store_false")
+    p.add_argument("--percdamp", type=float, default=0.01,
+                   help="(method=lnq) relative dampening added to diag(H) for PD-safety.")
+    p.add_argument("--score", choices=["lite", "cov"], default="cov",
+                   help="(method=lnq) NCC ordering: 'lite' = |mu|/g, "
+                        "'cov' = |mu|/((sigma_ii+eps) g) (NCC-Cov).")
+    p.add_argument("--cov-eps", type=float, default=1e-6,
+                   help="(method=lnq) epsilon in the NCC-Cov denominator (cov score).")
+    p.add_argument("--mse-guard", dest="mse_guard", action="store_true", default=False,
+                   help="(method=lnq, diag mode) admit only flips with gap < 2|e| "
+                        "(Corollary-2 diagonal safety gate).")
+    p.add_argument("--mse-guard-mode", choices=["diag", "full-screen", "full-greedy"],
+                   default="full-greedy",
+                   help="(method=lnq) NCC corrector. 'diag': faithful published apply_ncc "
+                        "(--mse-guard toggles the diagonal Cor-2 gate). 'full-screen' / "
+                        "'full-greedy' (DEFAULT): off-spec apply_ncc_full_sigma gating each "
+                        "flip on the EXACT full-Sigma awMSE change; full-greedy applies the "
+                        "rank-1 (H e) update between flips (full awMSE provably non-increasing), "
+                        "full-screen uses the cheaper pre-flip screen.")
+    p.add_argument("--lnq-keep-activation-sample", dest="lnq_keep_activation_sample",
+                   action="store_true", default=True,
+                   help="(method=lnq) keep a bounded activation sample per layer for awMSE diagnostics.")
+    p.add_argument("--no-lnq-keep-activation-sample", dest="lnq_keep_activation_sample",
+                   action="store_false")
+    p.add_argument("--diag-max-tokens", type=int, default=4096,
+                   help="(method=lnq) cap tokens kept per layer for activation-weighted MSE.")
 
     p.add_argument("--eval-stride", type=int, default=512)
     p.add_argument("--eval-max-length", type=int, default=2048)
@@ -712,6 +753,25 @@ def main():
             correction="ncc",
         )
         quant_stats = gptvq_stats
+    elif args.method == "lnq":
+        # LNQ (GuidedQuant layer-wise non-uniform quant) backbone + NCC correction.
+        # Imported lazily: lnq_ncc_quant imports debug_ncc_mse_lnq, which sets up
+        # sys.path for the ./GuidedQuant and ./NCCQuant checkouts and the
+        # transformers.Conv1D shim, so it must only run when method=lnq.
+        from lnq_ncc_quant import quantize_model_lnq
+
+        # The corrector helpers read args.ncc_use_james_stein / args.score /
+        # args.mse_guard / args.mse_guard_mode / args.cov_eps; main.py stores the
+        # James-Stein toggle under args.ncc_james_stein.
+        args.ncc_use_james_stein = args.ncc_james_stein
+        lnq_stats = quantize_model_lnq(
+            model=model,
+            tokenizer=tokenizer,
+            calib_texts=calib_texts,
+            args=args,
+            device=device,
+        )
+        quant_stats = lnq_stats
     elif args.method == "gptq":
         model, gptq_stats = quantize_model_gptq(
             model=model,

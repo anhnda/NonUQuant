@@ -1,3 +1,14 @@
+LNQ:
+Llama
+
+MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b \
+DEVICE=cuda:0 N_CALIB=128 WBITS=3 \
+NCC_SCORE=cov COV_EPS=1e-2 BUDGET_P=0.005 \
+GUIDED=1 LNQ_ITERS=3 CD_CYCLES=4 \
+RUN_BASE=1 RUN_NCC_FULL_GREEDY=1 RUN_NCC_FULL_SCREEN=0 RUN_NCC_DIAG=0 \
+OUT_ROOT=./runs_lnq3_llama3_fullgreedy_005 \
+bash run_lnq_ncc.sh
+
 Qwen 2.5
 MODEL=/home/DATA/prometheus/anh/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B/snapshots/d149729398750b98c0af14eb82c78cfe92750796 \
 DEVICE=cuda:0 N_CALIB=128 WBITS=4 GROUPSIZE=128 \
