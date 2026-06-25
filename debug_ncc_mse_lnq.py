@@ -132,11 +132,81 @@ def _load_ncc():
     return _NCC_APPLY, _QUANT_RESULT
 
 
-def _load_lnq():
-    """Return the real LNQ optimiser train_least_squares from GuidedQuant."""
-    from any_precision.quantization.layerwise_quantize import train_least_squares
+_LNQ_TLS = None
 
-    return train_least_squares
+
+def _load_lnq():
+    """Return the real LNQ optimiser train_least_squares from GuidedQuant.
+
+    `layerwise_quantize.py` is loaded BY FILE PATH so that GuidedQuant's package
+    __init__ chain (any_precision.modules -> AnyPrecisionForCausalLM -> analyzer
+    -> splitted_models.qwen3 -> transformers.cache_utils.SlidingWindowCache) is
+    never triggered. That chain breaks on some transformers versions and is dead
+    weight for `train_least_squares`, which only needs `get_progress_bar`.
+
+    We pre-seed sys.modules with light stubs for the two heavy module-level
+    imports `layerwise_quantize.py` makes:
+      - any_precision.analyzer.analyzer.ModelAnalyzer  (imported, unused here)
+      - any_precision.quantization.utils.get_progress_bar (real, via tqdm; the
+        upstream utils.py also imports numba, which we avoid)
+    """
+    global _LNQ_TLS
+    if _LNQ_TLS is not None:
+        return _LNQ_TLS
+
+    lq_file = GUIDED_ROOT / "any_precision" / "quantization" / "layerwise_quantize.py"
+    if not lq_file.exists():
+        raise RuntimeError(
+            f"Missing GuidedQuant LNQ source at {lq_file}. Expected the GuidedQuant "
+            f"checkout under {GUIDED_ROOT}."
+        )
+
+    # --- stub package tree so the by-path module's `from any_precision...` lines
+    #     resolve to our lightweight shims instead of the real (heavy) modules. ---
+    def _ensure_pkg(qualname: str):
+        if qualname in sys.modules:
+            return sys.modules[qualname]
+        mod = types.ModuleType(qualname)
+        mod.__path__ = []  # mark as package so submodule imports are allowed
+        sys.modules[qualname] = mod
+        return mod
+
+    # Only install stubs if the real ones are not already importable cleanly.
+    if "any_precision.analyzer.analyzer" not in sys.modules:
+        _ensure_pkg("any_precision")
+        _ensure_pkg("any_precision.analyzer")
+        analyzer_mod = types.ModuleType("any_precision.analyzer.analyzer")
+
+        class _ModelAnalyzerStub:  # noqa: D401 - placeholder, never instantiated here
+            """Stub: train_least_squares does not use ModelAnalyzer."""
+
+        analyzer_mod.ModelAnalyzer = _ModelAnalyzerStub
+        sys.modules["any_precision.analyzer.analyzer"] = analyzer_mod
+
+    if "any_precision.quantization.utils" not in sys.modules:
+        _ensure_pkg("any_precision")
+        _ensure_pkg("any_precision.quantization")
+        utils_mod = types.ModuleType("any_precision.quantization.utils")
+        from tqdm import tqdm as _tqdm
+
+        def _get_progress_bar(total, desc):
+            return _tqdm(total=total, desc=desc,
+                         bar_format="{l_bar}{bar:10}{r_bar}{bar:-10b}")
+
+        utils_mod.get_progress_bar = _get_progress_bar
+        sys.modules["any_precision.quantization.utils"] = utils_mod
+
+    spec = importlib.util.spec_from_file_location(
+        "any_precision.quantization.layerwise_quantize", lq_file
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load LNQ module from {lq_file}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["any_precision.quantization.layerwise_quantize"] = module
+    spec.loader.exec_module(module)
+
+    _LNQ_TLS = module.train_least_squares
+    return _LNQ_TLS
 
 
 # ---------------------------------------------------------------------------
